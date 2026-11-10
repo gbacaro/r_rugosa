@@ -370,7 +370,8 @@ eu_precoast <- precoast %>%
 assign_occurrences_to_mask <- function(
   df,
   mask_rast,
-  max_snap_m = 1500
+  max_snap_m = 1500,
+  deduplicate = TRUE
 ) {
 
   if (nrow(df) == 0) {
@@ -583,29 +584,46 @@ assign_occurrences_to_mask <- function(
     out_list
   )
 
-  # Deterministic one-record-per-cell aggregation.
-  assigned <- assigned %>%
-    arrange(
-      cell_id,
-      snap_distance_m,
-      gbif_id
-    ) %>%
-    group_by(
-      cell_id
-    ) %>%
-    slice(1) %>%
-    ungroup()
+  # Deterministic one-record-per-cell aggregation when requested.
+  if (deduplicate) {
+
+    assigned <- assigned %>%
+      arrange(
+        cell_id,
+        snap_distance_m,
+        gbif_id
+      ) %>%
+      group_by(
+        cell_id
+      ) %>%
+      slice(1) %>%
+      ungroup()
+  }
 
   assigned$.source_row <- NULL
 
   assigned
 }
 
-gbif_final7 <- assign_occurrences_to_mask(
+# Keep both the full assignment and the one-record-per-cell calibration set.
+gbif_final7_all <- assign_occurrences_to_mask(
   eu_precoast,
   final7_mask,
-  max_snap_m = 1500
+  max_snap_m = 1500,
+  deduplicate = FALSE
 )
+
+gbif_final7 <- gbif_final7_all %>%
+  arrange(
+    cell_id,
+    snap_distance_m,
+    gbif_id
+  ) %>%
+  group_by(
+    cell_id
+  ) %>%
+  slice(1) %>%
+  ungroup()
 
 gbif_final7$pa <- 1L
 
@@ -725,6 +743,93 @@ rev1_absent_trace <- rev1_occ %>%
       eu_precoast$gbif_id
   )
 
+# Directly trace the same GBIF record in the unthinned FINAL7 assignment.
+rev2_all_map <- gbif_final7_all %>%
+  transmute(
+    gbif_id = as.character(gbif_id),
+    rev2_cell_id_same_record = cell_id,
+    rev2_snap_distance_m_same_record = snap_distance_m,
+    rev2_snap_type_same_record = snap_type
+  )
+
+rev1_absent_trace <- rev1_absent_trace %>%
+  left_join(
+    rev2_all_map,
+    by = "gbif_id"
+  ) %>%
+  mutate(
+    same_record_reassigned =
+      !is.na(rev2_cell_id_same_record) &
+      rev2_cell_id_same_record != cell_id,
+
+    same_record_same_cell =
+      !is.na(rev2_cell_id_same_record) &
+      rev2_cell_id_same_record == cell_id
+  )
+
+# For records removed by the pre-coastal coordinate deduplication,
+# identify a surviving record with the same coordinate key when available.
+rev1_absent_trace$replacement_gbif_id_same_coord <- NA_character_
+rev1_absent_trace$replacement_rev2_cell_id_same_coord <- NA_integer_
+
+if (
+  "coord_key" %in% names(rev1_absent_trace) &&
+  "coord_key" %in% names(precoast)
+) {
+
+  precoast_coord_map <- precoast %>%
+    filter(
+      !is.na(coord_key),
+      coord_key != ""
+    ) %>%
+    transmute(
+      coord_key,
+      replacement_gbif_id_same_coord =
+        as.character(gbif_id)
+    ) %>%
+    distinct(
+      coord_key,
+      .keep_all = TRUE
+    )
+
+  replacement_map <- rev1_absent_trace %>%
+    select(
+      gbif_id,
+      coord_key
+    ) %>%
+    left_join(
+      precoast_coord_map,
+      by = "coord_key"
+    ) %>%
+    left_join(
+      rev2_all_map %>%
+        rename(
+          replacement_gbif_id_same_coord = gbif_id,
+          replacement_rev2_cell_id_same_coord =
+            rev2_cell_id_same_record
+        ) %>%
+        select(
+          replacement_gbif_id_same_coord,
+          replacement_rev2_cell_id_same_coord
+        ),
+      by = "replacement_gbif_id_same_coord"
+    )
+
+  rev1_absent_trace <-
+    rev1_absent_trace %>%
+    select(
+      -replacement_gbif_id_same_coord,
+      -replacement_rev2_cell_id_same_coord
+    ) %>%
+    left_join(
+      replacement_map,
+      by = c(
+        "gbif_id",
+        "coord_key"
+      )
+    )
+}
+
 # Reconstruct declared filter status for the missing REV1 records.
 if (exists(
   "flagged",
@@ -829,14 +934,24 @@ if (exists(
             !pass_uncertainty_5km ~
               "fails_declared_uncertainty_5km_filter",
 
+            !in_declared_precoast &
+              !is.na(replacement_gbif_id_same_coord) ~
+              "old_REV1_record_removed_by_coordinate_dedup_but_same_coordinate_retained",
+
             !in_declared_precoast ~
-              "passes_declared_filters_but_removed_by_coordinate_dedup_or_other_precoast_step",
+              "passes_declared_filters_but_removed_by_other_precoast_step",
 
             !in_europe_precoast ~
               "outside_Europe_bbox",
 
+            same_record_reassigned ~
+              "same_GBIF_record_reassigned_to_different_FINAL7_cell",
+
+            same_record_same_cell ~
+              "same_GBIF_record_kept_in_same_cell_but_not_selected_as_representative",
+
             TRUE ~
-              "record_enters_precoast_but_cell_not_retained_in_REV2"
+              "unresolved_after_direct_REV2_record_trace"
           )
       )
   }
@@ -1519,6 +1634,7 @@ saveRDS(
     final7_vars = final7_vars,
     n_final7_cells = n_final7_cells,
     gbif_final7 = gbif_final7,
+    gbif_final7_all = gbif_final7_all,
     cell_compare_summary = cell_compare_summary,
     country_summary = country_summary,
     target_country_summary = target_country_summary,
@@ -1565,6 +1681,7 @@ canonical_workflow <- c(
   "IMPORTANT",
   "REV2 occurrence reconstruction uses the quality filters declared in the manuscript and the seven-predictor current coastal mask.",
   "Sara/Ribotta independence is assessed against all GBIF records passing the declared filters before spatial thinning; records are not yet added to model calibration.",
+  "REV1 cells absent from the FINAL7 cell set are traced to the same GBIF record under the expanded mask, including coordinate-deduplication replacements."
   "No model is refitted in steps 00-05."
 )
 
