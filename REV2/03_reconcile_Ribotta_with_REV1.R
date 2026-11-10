@@ -103,6 +103,7 @@ obsolete_scripts <- file.path(
 obsolete_audit_patterns <- c(
   "^03[A-I]_",
   "^03COR_",
+  "^03_MISSING_",
   "^04[A-F]_",
   "^05[A-I]_",
   "^REV2_AUDIT_SUMMARY_STAGE1\\.csv$"
@@ -891,11 +892,70 @@ sara_df <- bind_cols(
 )
 
 # ------------------------------------------------------------
-# 7. Country assignment from the REV1 world polygons
+# 7. Robust country assignment
+#
+# Country names from Natural Earth are treated as the primary source.
+# ISO codes are derived from the country name when the native ISO field
+# is missing or coded as -99. Points falling just outside a polygon
+# because of coastline generalisation are assigned to the nearest
+# country only when the distance is <= 20 km.
 # ------------------------------------------------------------
+
+country_name_to_iso2 <- function(x) {
+
+  y <- toupper(trimws(as.character(x)))
+
+  map <- c(
+    "UNITED KINGDOM" = "GB",
+    "FRANCE" = "FR",
+    "ITALY" = "IT",
+    "SPAIN" = "ES",
+    "PORTUGAL" = "PT",
+    "GREECE" = "GR",
+    "CROATIA" = "HR",
+    "SLOVENIA" = "SI",
+    "MONTENEGRO" = "ME",
+    "ALBANIA" = "AL",
+    "BOSNIA AND HERZEGOVINA" = "BA",
+    "TURKEY" = "TR",
+    "TÜRKIYE" = "TR",
+    "BULGARIA" = "BG",
+    "ROMANIA" = "RO",
+    "CYPRUS" = "CY",
+    "MALTA" = "MT",
+    "GERMANY" = "DE",
+    "DENMARK" = "DK",
+    "NORWAY" = "NO",
+    "SWEDEN" = "SE",
+    "FINLAND" = "FI",
+    "POLAND" = "PL",
+    "NETHERLANDS" = "NL",
+    "BELGIUM" = "BE",
+    "IRELAND" = "IE",
+    "ESTONIA" = "EE",
+    "LATVIA" = "LV",
+    "LITHUANIA" = "LT",
+    "ICELAND" = "IS",
+    "UKRAINE" = "UA",
+    "GEORGIA" = "GE",
+    "RUSSIA" = "RU",
+    "RUSSIAN FEDERATION" = "RU"
+  )
+
+  unname(
+    map[
+      match(
+        y,
+        names(map)
+      )
+    ]
+  )
+}
 
 sara_df$country_code <- NA_character_
 sara_df$country_name <- NA_character_
+sara_df$country_assignment_method <- NA_character_
+sara_df$country_polygon_distance_m <- NA_real_
 
 if (
   !is.null(world) &&
@@ -911,78 +971,136 @@ if (
     world_4326
   )
 
-  code_candidates <- c(
-    "iso_a2",
-    "ISO_A2",
-    "adm0_a3",
-    "ADM0_A3"
-  )
-
   name_candidates <- c(
     "admin",
     "ADMIN",
     "name",
-    "NAME"
+    "NAME",
+    "sovereignt",
+    "SOVEREIGNT"
   )
-
-  code_col <- code_candidates[
-    code_candidates %in%
-      world_names
-  ][1]
 
   name_col <- name_candidates[
     name_candidates %in%
       world_names
   ][1]
 
-  keep <- c(
-    code_col,
-    name_col
+  if (is.na(name_col)) {
+    stop(
+      "Could not identify a country-name field in the REV1 world polygons."
+    )
+  }
+
+  # One-to-one polygon assignment without row multiplication.
+  within_list <- sf::st_within(
+    sara,
+    world_4326
   )
 
-  keep <- keep[
-    !is.na(keep)
-  ]
+  inside_idx <- vapply(
+    within_list,
+    function(z) {
+      if (length(z) == 0) NA_integer_ else z[1]
+    },
+    integer(1)
+  )
 
-  if (length(keep) > 0) {
+  inside <- !is.na(
+    inside_idx
+  )
 
-    joined <- suppressWarnings(
-      sf::st_join(
-        sara,
-        world_4326[
-          ,
-          keep,
-          drop = FALSE
+  if (any(inside)) {
+
+    sara_df$country_name[
+      inside
+    ] <- as.character(
+      world_4326[[name_col]][
+        inside_idx[inside]
+      ]
+    )
+
+    sara_df$country_assignment_method[
+      inside
+    ] <- "polygon_within"
+
+    sara_df$country_polygon_distance_m[
+      inside
+    ] <- 0
+  }
+
+  # Coastal points may fall just outside medium-resolution polygons.
+  outside <- which(
+    !inside
+  )
+
+  if (length(outside) > 0) {
+
+    sara_out_m <- sf::st_transform(
+      sara[
+        outside,
+      ],
+      3035
+    )
+
+    world_m <- sf::st_transform(
+      world_4326,
+      3035
+    )
+
+    nearest_country_idx <- sf::st_nearest_feature(
+      sara_out_m,
+      world_m
+    )
+
+    nearest_country_dist <- as.numeric(
+      sf::st_distance(
+        sara_out_m,
+        world_m[
+          nearest_country_idx,
         ],
-        left = TRUE,
-        join = sf::st_intersects
+        by_element = TRUE
       )
     )
 
-    if (
-      !is.na(code_col) &&
-      code_col %in%
-        names(joined)
-    ) {
+    near_enough <- is.finite(
+      nearest_country_dist
+    ) &
+      nearest_country_dist <= 20000
 
-      sara_df$country_code <-
-        as.character(
-          joined[[code_col]]
-        )
-    }
+    if (any(near_enough)) {
 
-    if (
-      !is.na(name_col) &&
-      name_col %in%
-        names(joined)
-    ) {
+      rows <- outside[
+        near_enough
+      ]
 
-      sara_df$country_name <-
-        as.character(
-          joined[[name_col]]
-        )
+      poly_idx <- nearest_country_idx[
+        near_enough
+      ]
+
+      sara_df$country_name[
+        rows
+      ] <- as.character(
+        world_4326[[name_col]][
+          poly_idx
+        ]
+      )
+
+      sara_df$country_assignment_method[
+        rows
+      ] <- "nearest_polygon_le20km"
+
+      sara_df$country_polygon_distance_m[
+        rows
+      ] <- nearest_country_dist[
+        near_enough
+      ]
     }
   }
+
+  sara_df$country_code <-
+    country_name_to_iso2(
+      sara_df$country_name
+    )
 }
 
 # ------------------------------------------------------------
@@ -1131,6 +1249,72 @@ sara_df$nearest_flagged_original_row <-
   flagged_spatial$.flagged_row_original[
     nearest_idx
   ]
+
+
+# Country reported by the nearest GBIF record, used as an independent
+# provenance check rather than as the primary geographic assignment.
+flag_country_candidates <- c(
+  "country_code",
+  "countryCode",
+  "country"
+)
+
+flag_country_col <- flag_country_candidates[
+  flag_country_candidates %in%
+    names(flagged_spatial)
+][1]
+
+sara_df$country_code_nearest_GBIF <- NA_character_
+
+if (!is.na(flag_country_col)) {
+
+  raw_gbif_country <- as.character(
+    flagged_spatial[[flag_country_col]][
+      nearest_idx
+    ]
+  )
+
+  raw_upper <- toupper(
+    trimws(
+      raw_gbif_country
+    )
+  )
+
+  already_iso2 <- grepl(
+    "^[A-Z]{2}$",
+    raw_upper
+  )
+
+  sara_df$country_code_nearest_GBIF[
+    already_iso2
+  ] <- raw_upper[
+    already_iso2
+  ]
+
+  needs_name_map <- !already_iso2 &
+    !is.na(raw_upper) &
+    raw_upper != ""
+
+  if (any(needs_name_map)) {
+
+    sara_df$country_code_nearest_GBIF[
+      needs_name_map
+    ] <- country_name_to_iso2(
+      raw_upper[
+        needs_name_map
+      ]
+    )
+  }
+}
+
+sara_df$country_polygon_vs_GBIF_agree <-
+  ifelse(
+    is.na(sara_df$country_code) |
+      is.na(sara_df$country_code_nearest_GBIF),
+    NA,
+    sara_df$country_code ==
+      sara_df$country_code_nearest_GBIF
+  )
 
 # ------------------------------------------------------------
 # 10. Point-level status
@@ -1289,6 +1473,30 @@ point_country_summary <- sara_df %>%
     GBIF_within_1km =
       sum(
         gbif_match_1km,
+        na.rm = TRUE
+      ),
+
+    country_assigned_by_polygon =
+      sum(
+        country_assignment_method == "polygon_within",
+        na.rm = TRUE
+      ),
+
+    country_assigned_by_nearest_polygon =
+      sum(
+        country_assignment_method == "nearest_polygon_le20km",
+        na.rm = TRUE
+      ),
+
+    polygon_GBIF_country_agreement =
+      sum(
+        country_polygon_vs_GBIF_agree %in% TRUE,
+        na.rm = TRUE
+      ),
+
+    polygon_GBIF_country_disagreement =
+      sum(
+        country_polygon_vs_GBIF_agree %in% FALSE,
         na.rm = TRUE
       ),
 
@@ -1563,6 +1771,29 @@ write_csv(
   )
 )
 
+
+country_assignment_diagnostic <- sara_df %>%
+  count(
+    country_code,
+    country_name,
+    country_assignment_method,
+    country_code_nearest_GBIF,
+    country_polygon_vs_GBIF_agree,
+    name = "n_points"
+  ) %>%
+  arrange(
+    country_code,
+    desc(n_points)
+  )
+
+write_csv(
+  country_assignment_diagnostic,
+  file.path(
+    audit_dir,
+    "03COR_F2_country_assignment_diagnostic.csv"
+  )
+)
+
 write_csv(
   reviewer_cells_summary,
   file.path(
@@ -1628,7 +1859,8 @@ canonical_workflow <- c(
   "",
   "IMPORTANT",
   "Previous 03/04/05 audit outputs based on eu_df as a geographic grid were deleted.",
-  "The canonical step 03 uses the official REV1 raster-valid coastal mask reconstructed from current_europe_coast1km_selectedvars.tif.",
+  "The canonical step 03 uses the official REV1 raster-valid coastal mask recovered from the saved RDS when available, otherwise rebuilt from the current CHELSA TIFF.",
+  "Country assignment uses Natural Earth country names with a <=20 km nearest-polygon fallback for coastal points and is cross-checked against the nearest GBIF record.",
   "Only outputs prefixed 03COR_ and the RDS 03COR_Ribotta_REV1_reconciliation.rds are valid for the Ribotta reconciliation stage."
 )
 
