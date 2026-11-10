@@ -307,7 +307,7 @@ if (length(missing_final7) > 0) {
   )
 }
 
-clim7 <- clim[[final7_vars]]
+clim7 <- clim[final7_vars]
 
 # ------------------------------------------------------------
 # 4. Rebuild FINAL7 valid-cell mask
