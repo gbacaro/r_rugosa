@@ -251,36 +251,31 @@ print(
   n = nrow(asset_inventory)
 )
 
-if (is.na(mask10_file)) {
-  stop(
-    "Official REV1 mask europe_valid_coastal_cells_1km.rds not found."
-  )
-}
-
 if (is.na(coast_stack_file)) {
   stop(
     "current_europe_coast1km_selectedvars.tif was not found. ",
-    "This audit requires the current 10-layer coastal stack so that ",
-    "support can be evaluated predictor by predictor."
+    "This audit requires the current 10-layer coastal stack."
   )
 }
 
-# ------------------------------------------------------------
-# 3. Load official mask and current coastal stack
-# ------------------------------------------------------------
-
-mask10 <- readRDS(
-  mask10_file
-)
-
-if (!inherits(mask10, "SpatRaster")) {
+if (is.na(bbox_stack_file)) {
   stop(
-    "REV1 all-10 mask is not a SpatRaster."
+    "current_europe_bbox_selectedvars.tif was not found. ",
+    "This audit requires the unmasked Europe bbox stack to distinguish ",
+    "geographic coastal-mask loss from predictor-specific NA values."
   )
 }
+
+# ------------------------------------------------------------
+# 3. Load current coastal and bbox climate stacks
+# ------------------------------------------------------------
 
 clim10 <- terra::rast(
   coast_stack_file
+)
+
+bbox10 <- terra::rast(
+  bbox_stack_file
 )
 
 expected_vars <- c(
@@ -289,21 +284,42 @@ expected_vars <- c(
   "fcf", "gsl", "gst"
 )
 
-missing_vars <- setdiff(
+missing_coast_vars <- setdiff(
   expected_vars,
   names(clim10)
 )
 
-if (length(missing_vars) > 0) {
+missing_bbox_vars <- setdiff(
+  expected_vars,
+  names(bbox10)
+)
+
+if (length(missing_coast_vars) > 0) {
   stop(
-    "Current coastal climate stack is missing: ",
-    paste(missing_vars, collapse = ", ")
+    "Current coastal stack is missing: ",
+    paste(missing_coast_vars, collapse = ", ")
   )
 }
 
-clim10 <- clim10[
-  [expected_vars]
-]
+if (length(missing_bbox_vars) > 0) {
+  stop(
+    "Current bbox stack is missing: ",
+    paste(missing_bbox_vars, collapse = ", ")
+  )
+}
+
+clim10 <- clim10[[expected_vars]]
+bbox10 <- bbox10[[expected_vars]]
+
+if (!terra::compareGeom(
+  clim10[[1]],
+  bbox10[[1]],
+  stopOnError = FALSE
+)) {
+  stop(
+    "Current coastal and bbox stacks do not share raster geometry."
+  )
+}
 
 final7_vars <- c(
   "bio3", "bio8", "bio9",
@@ -312,34 +328,43 @@ final7_vars <- c(
 )
 
 # ------------------------------------------------------------
-# 4. Validate geometry and cell count
+# 4. Optional saved REV1 mask
+#
+# The saved RDS is not required. When absent, the ALL10 mask is
+# reconstructed directly from the official current coastal TIFF.
 # ------------------------------------------------------------
 
-same_geometry_mask_stack <- terra::compareGeom(
-  mask10,
-  clim10[[1]],
-  stopOnError = FALSE
-)
+mask10_saved <- NULL
+n_mask10_saved <- NA_integer_
 
-n_mask10 <- as.integer(
-  terra::global(
-    mask10,
-    "sum",
-    na.rm = TRUE
-  )[1, 1]
-)
+if (!is.na(mask10_file)) {
 
-if (!same_geometry_mask_stack) {
-  stop(
-    "REV1 mask and current climate stack do not share raster geometry."
+  mask10_saved <- readRDS(
+    mask10_file
   )
-}
 
-if (n_mask10 != 79579L) {
-  stop(
-    "REV1 mask contains ",
-    n_mask10,
-    " cells rather than the expected 79,579."
+  if (!inherits(mask10_saved, "SpatRaster")) {
+    stop(
+      "Saved REV1 mask exists but is not a SpatRaster."
+    )
+  }
+
+  if (!terra::compareGeom(
+    mask10_saved,
+    clim10[[1]],
+    stopOnError = FALSE
+  )) {
+    stop(
+      "Saved REV1 mask and current coastal stack do not share raster geometry."
+    )
+  }
+
+  n_mask10_saved <- as.integer(
+    terra::global(
+      mask10_saved,
+      "sum",
+      na.rm = TRUE
+    )[1, 1]
   )
 }
 
@@ -400,7 +425,24 @@ n_final7 <- as.integer(
 )
 
 all10_rebuild_matches_saved <-
-  n_all10_rebuilt == n_mask10
+  if (is.na(n_mask10_saved)) {
+    NA
+  } else {
+    n_all10_rebuilt == n_mask10_saved
+  }
+
+# The canonical REV1 analysis reported 79,579 ALL10 cells.
+all10_matches_reported_REV1 <-
+  n_all10_rebuilt == 79579L
+
+if (!all10_matches_reported_REV1) {
+  stop(
+    "Rebuilt ALL10 mask contains ",
+    n_all10_rebuilt,
+    " cells instead of the REV1-reported 79,579. ",
+    "Do not interpret downstream diagnostics."
+  )
+}
 
 # ------------------------------------------------------------
 # 6. Per-variable spatial support
@@ -457,6 +499,54 @@ write_csv(
   file.path(
     audit_dir,
     "04B_current_variable_support.csv"
+  )
+)
+
+
+# ------------------------------------------------------------
+# 6B. BBOX vs COASTAL support by variable
+# ------------------------------------------------------------
+
+bbox_coast_support <- bind_rows(
+  lapply(
+    expected_vars,
+    function(v) {
+
+      bbox_valid <- !is.na(bbox10[[v]])
+      coast_valid <- !is.na(clim10[[v]])
+
+      n_bbox <- as.integer(
+        terra::global(
+          bbox_valid,
+          "sum",
+          na.rm = TRUE
+        )[1, 1]
+      )
+
+      n_coast <- as.integer(
+        terra::global(
+          coast_valid,
+          "sum",
+          na.rm = TRUE
+        )[1, 1]
+      )
+
+      tibble(
+        variable = v,
+        bbox_valid_cells = n_bbox,
+        coastal_valid_cells = n_coast,
+        coastal_pct_of_bbox =
+          100 * n_coast / n_bbox
+      )
+    }
+  )
+)
+
+write_csv(
+  bbox_coast_support,
+  file.path(
+    audit_dir,
+    "04B2_bbox_vs_coastal_variable_support.csv"
   )
 )
 
@@ -768,6 +858,218 @@ write_csv(
 )
 
 # ------------------------------------------------------------
+# 9B. Direct predictor extraction at Sara/Ribotta coordinates
+#
+# This distinguishes:
+# - climate available in the unmasked Europe bbox;
+# - cell retained by the geographic coastal TIFF;
+# - predictor-specific NA inside the coastal TIFF.
+# ------------------------------------------------------------
+
+sara_vect <- terra::vect(
+  sara_points,
+  geom = c("sara_lon", "sara_lat"),
+  crs = "EPSG:4326"
+)
+
+bbox_at_sara <- terra::extract(
+  bbox10,
+  sara_vect,
+  ID = FALSE
+)
+
+coast_at_sara <- terra::extract(
+  clim10,
+  sara_vect,
+  ID = FALSE
+)
+
+names(bbox_at_sara) <- paste0(
+  "bbox_",
+  names(bbox_at_sara)
+)
+
+names(coast_at_sara) <- paste0(
+  "coast_",
+  names(coast_at_sara)
+)
+
+sara_predictor_support <- bind_cols(
+  sara_points %>%
+    select(
+      sara_id,
+      sara_lon,
+      sara_lat,
+      country_code,
+      country_name,
+      nearest_flagged_distance_m,
+      gbif_match_1km
+    ),
+  bbox_at_sara,
+  coast_at_sara
+)
+
+for (v in expected_vars) {
+
+  sara_predictor_support[[
+    paste0("bbox_valid_", v)
+  ]] <- !is.na(
+    sara_predictor_support[[
+      paste0("bbox_", v)
+    ]]
+  )
+
+  sara_predictor_support[[
+    paste0("coast_valid_", v)
+  ]] <- !is.na(
+    sara_predictor_support[[
+      paste0("coast_", v)
+    ]]
+  )
+}
+
+sara_predictor_support$n_bbox_valid_10 <- rowSums(
+  as.data.frame(
+    sara_predictor_support[
+      paste0(
+        "bbox_valid_",
+        expected_vars
+      )
+    ]
+  )
+)
+
+sara_predictor_support$n_coast_valid_10 <- rowSums(
+  as.data.frame(
+    sara_predictor_support[
+      paste0(
+        "coast_valid_",
+        expected_vars
+      )
+    ]
+  )
+)
+
+sara_predictor_support$n_bbox_valid_FINAL7 <- rowSums(
+  as.data.frame(
+    sara_predictor_support[
+      paste0(
+        "bbox_valid_",
+        final7_vars
+      )
+    ]
+  )
+)
+
+sara_predictor_support$n_coast_valid_FINAL7 <- rowSums(
+  as.data.frame(
+    sara_predictor_support[
+      paste0(
+        "coast_valid_",
+        final7_vars
+      )
+    ]
+  )
+)
+
+sara_predictor_support$bbox_FINAL7_complete <-
+  sara_predictor_support$n_bbox_valid_FINAL7 ==
+  length(final7_vars)
+
+sara_predictor_support$coast_FINAL7_complete <-
+  sara_predictor_support$n_coast_valid_FINAL7 ==
+  length(final7_vars)
+
+sara_predictor_support$bbox_ALL10_complete <-
+  sara_predictor_support$n_bbox_valid_10 ==
+  length(expected_vars)
+
+sara_predictor_support$coast_ALL10_complete <-
+  sara_predictor_support$n_coast_valid_10 ==
+  length(expected_vars)
+
+write_csv(
+  sara_predictor_support,
+  file.path(
+    audit_dir,
+    "04D2_Sara_predictor_support_bbox_vs_coast.csv"
+  )
+)
+
+critical_predictor_support <- sara_predictor_support %>%
+  filter(
+    country_code %in%
+      c("IT", "FR", "GB")
+  ) %>%
+  arrange(
+    country_code,
+    sara_id
+  )
+
+write_csv(
+  critical_predictor_support,
+  file.path(
+    audit_dir,
+    "04D3_Italy_France_UK_predictor_support.csv"
+  )
+)
+
+critical_support_summary <- critical_predictor_support %>%
+  group_by(
+    country_code,
+    country_name
+  ) %>%
+  summarise(
+    n_points = n(),
+
+    n_bbox_FINAL7_complete =
+      sum(
+        bbox_FINAL7_complete,
+        na.rm = TRUE
+      ),
+
+    n_coast_FINAL7_complete =
+      sum(
+        coast_FINAL7_complete,
+        na.rm = TRUE
+      ),
+
+    n_bbox_ALL10_complete =
+      sum(
+        bbox_ALL10_complete,
+        na.rm = TRUE
+      ),
+
+    n_coast_ALL10_complete =
+      sum(
+        coast_ALL10_complete,
+        na.rm = TRUE
+      ),
+
+    n_bbox_valid_fcf =
+      sum(
+        bbox_valid_fcf,
+        na.rm = TRUE
+      ),
+
+    n_coast_valid_fcf =
+      sum(
+        coast_valid_fcf,
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  )
+
+write_csv(
+  critical_support_summary,
+  file.path(
+    audit_dir,
+    "04D4_critical_country_predictor_support_summary.csv"
+  )
+)
+
+# ------------------------------------------------------------
 # 10. Reviewer-country comparison
 # ------------------------------------------------------------
 
@@ -869,8 +1171,13 @@ write_csv(
 # ------------------------------------------------------------
 
 belt_summary <- tibble(
-  belt_available = FALSE,
-  belt_area_km2 = NA_real_
+  belt_available = !is.na(belt_file),
+  belt_area_km2 = NA_real_,
+  belt_source = ifelse(
+    is.na(belt_file),
+    "saved belt RDS unavailable; using coastal TIFF support diagnostics",
+    "saved geographic belt RDS"
+  )
 )
 
 if (!is.na(belt_file)) {
@@ -897,7 +1204,8 @@ if (!is.na(belt_file)) {
 
     belt_summary <- tibble(
       belt_available = TRUE,
-      belt_area_km2 = belt_area
+      belt_area_km2 = belt_area,
+      belt_source = "saved geographic belt RDS"
     )
   }
 }
@@ -916,9 +1224,10 @@ write_csv(
 
 summary_tbl <- tibble(
   metric = c(
-    "REV1 saved ALL10 valid cells",
-    "Rebuilt ALL10 valid cells",
+    "REV1 saved ALL10 valid cells (if RDS available)",
+    "Rebuilt ALL10 valid cells from coastal TIFF",
     "Saved vs rebuilt ALL10 count matches",
+    "Rebuilt ALL10 matches REV1 reported 79,579",
     "FINAL7 current valid cells",
     "Cells recovered by FINAL7 vs ALL10",
     "FINAL7 percent of ALL10",
@@ -930,9 +1239,10 @@ summary_tbl <- tibble(
   ),
 
   value = c(
-    as.character(n_mask10),
+    as.character(n_mask10_saved),
     as.character(n_all10_rebuilt),
     as.character(all10_rebuild_matches_saved),
+    as.character(all10_matches_reported_REV1),
     as.character(n_final7),
     as.character(
       n_final7 -
@@ -992,7 +1302,10 @@ saveRDS(
   list(
     asset_inventory = asset_inventory,
     variable_support = variable_support,
+    bbox_coast_support = bbox_coast_support,
     incremental_support = incremental_support,
+    sara_predictor_support = sara_predictor_support,
+    critical_support_summary = critical_support_summary,
     sara_mask_compare = sara_mask_compare,
     reviewer_mask_compare = reviewer_mask_compare,
     belt_summary = belt_summary,
@@ -1032,7 +1345,7 @@ canonical_workflow <- c(
   "",
   "IMPORTANT",
   "The canonical step 03 reproduces the actual REV1 all-10-variable raster-valid mask.",
-  "The canonical step 04 audits whether that mask was spatially restricted by current predictor NA patterns and compares it with the final seven-predictor current support.",
+  "The canonical step 04 reconstructs the ALL10 mask directly from the official coastal TIFF when the saved mask RDS is unavailable, compares it with FINAL7 support, and checks BBOX-vs-COAST predictor values at Sara/Ribotta points.",
   "No model is refitted in steps 00-04."
 )
 
@@ -1097,6 +1410,18 @@ cat(
 print(
   as.data.frame(
     reviewer_mask_compare
+  ),
+  row.names = FALSE
+)
+
+
+cat(
+  "\nItaly / France / UK direct predictor support (BBOX vs COAST):\n"
+)
+
+print(
+  as.data.frame(
+    critical_support_summary
   ),
   row.names = FALSE
 )
