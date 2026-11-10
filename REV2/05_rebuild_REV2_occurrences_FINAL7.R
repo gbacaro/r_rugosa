@@ -699,6 +699,156 @@ cell_compare_summary <- tibble(
   )
 )
 
+
+# Trace the REV1 cells that disappear in the rebuilt REV2 set.
+rev1_occ$gbif_id <- as.character(
+  rev1_occ$gbif_id
+)
+
+absent_rev1_cells <- setdiff(
+  rev1_cells,
+  rev2_cells
+)
+
+rev1_absent_trace <- rev1_occ %>%
+  filter(
+    cell_id %in%
+      absent_rev1_cells
+  ) %>%
+  mutate(
+    in_declared_precoast =
+      gbif_id %in%
+      precoast$gbif_id,
+
+    in_europe_precoast =
+      gbif_id %in%
+      eu_precoast$gbif_id
+  )
+
+# Reconstruct declared filter status for the missing REV1 records.
+if (exists(
+  "flagged",
+  envir = rev1,
+  inherits = FALSE
+)) {
+
+  flagged_rev1 <- as.data.frame(
+    get(
+      "flagged",
+      envir = rev1,
+      inherits = FALSE
+    )
+  )
+
+  if ("gbif_id" %in% names(flagged_rev1)) {
+
+    flagged_rev1$gbif_id <- as.character(
+      flagged_rev1$gbif_id
+    )
+
+    if (!"coordinate_uncertainty_in_meters" %in%
+        names(flagged_rev1)) {
+      flagged_rev1$coordinate_uncertainty_in_meters <-
+        NA_real_
+    }
+
+    if (!"basis_of_record" %in%
+        names(flagged_rev1)) {
+      flagged_rev1$basis_of_record <-
+        NA_character_
+    }
+
+    if (!"cc_pass" %in%
+        names(flagged_rev1)) {
+      flagged_rev1$cc_pass <-
+        NA
+    }
+
+    allowed_basis <- c(
+      "HUMAN_OBSERVATION",
+      "OBSERVATION",
+      "PRESERVED_SPECIMEN"
+    )
+
+    flagged_status <- flagged_rev1 %>%
+      mutate(
+        basis_norm =
+          toupper(
+            trimws(
+              as.character(
+                basis_of_record
+              )
+            )
+          ),
+
+        uncertainty_num =
+          suppressWarnings(
+            as.numeric(
+              coordinate_uncertainty_in_meters
+            )
+          ),
+
+        pass_basis =
+          basis_norm %in%
+          allowed_basis,
+
+        pass_cc =
+          !is.na(cc_pass) &
+          as.logical(cc_pass),
+
+        pass_uncertainty_5km =
+          is.na(uncertainty_num) |
+          uncertainty_num <= 5000
+      ) %>%
+      select(
+        gbif_id,
+        basis_norm,
+        uncertainty_num,
+        pass_basis,
+        pass_cc,
+        pass_uncertainty_5km
+      )
+
+    rev1_absent_trace <- rev1_absent_trace %>%
+      left_join(
+        flagged_status,
+        by = "gbif_id"
+      ) %>%
+      mutate(
+        likely_reason =
+          case_when(
+            is.na(pass_basis) ~
+              "record_not_found_in_flagged_archive",
+
+            !pass_basis ~
+              "fails_declared_basisOfRecord_filter",
+
+            !pass_cc ~
+              "fails_declared_CoordinateCleaner_filter",
+
+            !pass_uncertainty_5km ~
+              "fails_declared_uncertainty_5km_filter",
+
+            !in_declared_precoast ~
+              "passes_declared_filters_but_removed_by_coordinate_dedup_or_other_precoast_step",
+
+            !in_europe_precoast ~
+              "outside_Europe_bbox",
+
+            TRUE ~
+              "record_enters_precoast_but_cell_not_retained_in_REV2"
+          )
+      )
+  }
+}
+
+rev1_absent_reason_summary <- rev1_absent_trace %>%
+  count(
+    likely_reason,
+    name = "n_REV1_cells",
+    sort = TRUE
+  )
+
 # ------------------------------------------------------------
 # 7. GBIF country summaries
 # ------------------------------------------------------------
@@ -1009,7 +1159,10 @@ sara_point_audit$cell_already_in_GBIF_FINAL7 <-
   sara_point_audit$assigned_cell_id %in%
   rev2_cells
 
-# Nearest corrected GBIF occurrence using original coordinates.
+# Nearest retained FINAL7 GBIF occurrence using original coordinates.
+# This is useful for model-cell context but is NOT used by itself to
+# establish field-data independence.
+
 gbif_sf <- sf::st_as_sf(
   gbif_final7,
   coords = c(
@@ -1055,13 +1208,56 @@ nearest_dist <- as.numeric(
   )
 )
 
-sara_point_audit$nearest_REV2_GBIF_distance_m <-
+sara_point_audit$nearest_RETAINED_GBIF_distance_m <-
   nearest_dist
 
-sara_point_audit$nearest_REV2_GBIF_id <-
+sara_point_audit$nearest_RETAINED_GBIF_id <-
   as.character(
     gbif_final7$gbif_id[
       nearest_idx
+    ]
+  )
+
+# Independence must be assessed against ALL GBIF records that passed
+# the declared pre-coastal filters, before one-record-per-cell thinning.
+
+declared_gbif_sf <- sf::st_as_sf(
+  eu_precoast,
+  coords = c(
+    "decimal_longitude",
+    "decimal_latitude"
+  ),
+  crs = 4326,
+  remove = FALSE
+)
+
+declared_gbif_m <- sf::st_transform(
+  declared_gbif_sf,
+  3035
+)
+
+nearest_declared_idx <- sf::st_nearest_feature(
+  sara_m,
+  declared_gbif_m
+)
+
+nearest_declared_dist <- as.numeric(
+  sf::st_distance(
+    sara_m,
+    declared_gbif_m[
+      nearest_declared_idx,
+    ],
+    by_element = TRUE
+  )
+)
+
+sara_point_audit$nearest_DECLARED_GBIF_distance_m <-
+  nearest_declared_dist
+
+sara_point_audit$nearest_DECLARED_GBIF_id <-
+  as.character(
+    eu_precoast$gbif_id[
+      nearest_declared_idx
     ]
   )
 
@@ -1069,9 +1265,9 @@ sara_point_audit$candidate_independent_field_point <-
   sara_point_audit$retained_FINAL7 &
   !sara_point_audit$cell_already_in_GBIF_FINAL7 &
   is.finite(
-    sara_point_audit$nearest_REV2_GBIF_distance_m
+    sara_point_audit$nearest_DECLARED_GBIF_distance_m
   ) &
-  sara_point_audit$nearest_REV2_GBIF_distance_m >
+  sara_point_audit$nearest_DECLARED_GBIF_distance_m >
     1000
 
 # Candidate independent cells: one representative Sara point per cell.
@@ -1081,7 +1277,7 @@ candidate_independent_cells <- sara_point_audit %>%
   ) %>%
   arrange(
     assigned_cell_id,
-    nearest_REV2_GBIF_distance_m,
+    nearest_DECLARED_GBIF_distance_m,
     sara_id
   ) %>%
   group_by(
@@ -1097,7 +1293,7 @@ italy_detail <- sara_point_audit %>%
   arrange(
     candidate_independent_field_point %>%
       desc(),
-    nearest_REV2_GBIF_distance_m,
+    nearest_DECLARED_GBIF_distance_m,
     sara_id
   )
 
@@ -1218,6 +1414,23 @@ readr::write_csv(
   )
 )
 
+
+readr::write_csv(
+  rev1_absent_trace,
+  file.path(
+    audit_dir,
+    "05I_REV1_cells_absent_REV2_trace.csv"
+  )
+)
+
+readr::write_csv(
+  rev1_absent_reason_summary,
+  file.path(
+    audit_dir,
+    "05J_REV1_cells_absent_REV2_reason_summary.csv"
+  )
+)
+
 summary_tbl <- tibble(
   metric = c(
     "Declared-filter records before Europe restriction",
@@ -1313,6 +1526,8 @@ saveRDS(
     sara_country_summary = sara_country_summary,
     candidate_independent_cells = candidate_independent_cells,
     italy_detail = italy_detail,
+    rev1_absent_trace = rev1_absent_trace,
+    rev1_absent_reason_summary = rev1_absent_reason_summary,
     summary = summary_tbl,
     coast_file = coast_file
   ),
@@ -1349,7 +1564,7 @@ canonical_workflow <- c(
   "",
   "IMPORTANT",
   "REV2 occurrence reconstruction uses the quality filters declared in the manuscript and the seven-predictor current coastal mask.",
-  "Sara/Ribotta records are audited against the rebuilt GBIF set but are not yet added to model calibration.",
+  "Sara/Ribotta independence is assessed against all GBIF records passing the declared filters before spatial thinning; records are not yet added to model calibration.",
   "No model is refitted in steps 00-05."
 )
 
@@ -1408,6 +1623,17 @@ print(
 )
 
 cat(
+  "\nREV1 cells absent from REV2 - reason summary:\n"
+)
+
+print(
+  as.data.frame(
+    rev1_absent_reason_summary
+  ),
+  row.names = FALSE
+)
+
+cat(
   "\nItalian Sara/Ribotta detail:\n"
 )
 
@@ -1421,8 +1647,10 @@ print(
         retained_FINAL7,
         assigned_cell_id,
         cell_already_in_GBIF_FINAL7,
-        nearest_REV2_GBIF_distance_m,
-        nearest_REV2_GBIF_id,
+        nearest_RETAINED_GBIF_distance_m,
+        nearest_RETAINED_GBIF_id,
+        nearest_DECLARED_GBIF_distance_m,
+        nearest_DECLARED_GBIF_id,
         candidate_independent_field_point
       )
   ),
