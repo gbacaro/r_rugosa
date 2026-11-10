@@ -1681,7 +1681,7 @@ canonical_workflow <- c(
   "IMPORTANT",
   "REV2 occurrence reconstruction uses the quality filters declared in the manuscript and the seven-predictor current coastal mask.",
   "Sara/Ribotta independence is assessed against all GBIF records passing the declared filters before spatial thinning; records are not yet added to model calibration.",
-  "REV1 cells absent from the FINAL7 cell set are traced to the same GBIF record under the expanded mask, including coordinate-deduplication replacements."
+  "REV1 cells absent from the FINAL7 cell set are traced to the same GBIF record under the expanded mask, including coordinate-deduplication replacements.",
   "No model is refitted in steps 00-05."
 )
 
