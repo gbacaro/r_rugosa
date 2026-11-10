@@ -2,32 +2,47 @@
 # ROSA RUGOSA - REVISION 2
 # 03_reconcile_Ribotta_with_REV1.R
 #
-# Reconcile Sara/Ribotta (2021) occurrence points with:
-# - REV1 raw/clean/coastal occurrence stages
-# - final invaded coastal occurrences
-# - fixed raster-valid European coastal domain
+# IMPORTANT
+# ---------
+# This script supersedes the previous REV2 scripts 03, 04 and 05
+# for all analyses involving the European coastal domain.
 #
-# No occurrence is added to the model dataset.
-# No model is refitted.
+# It uses the SAME raster-valid coastal mask logic as the official
+# REV1 pipeline:
+#   current_europe_coast1km_selectedvars.tif
+#   -> complete-data mask across the 10 current predictors
+#   -> direct cell assignment
+#   -> nearest valid cell only when distance <= 1500 m
+#
+# No occurrence is added to the modelling dataset.
+# No model is fitted.
 # No REV1 file is modified.
 # ============================================================
 
 rm(list = ls())
 gc()
 
-required_pkgs <- c("sf", "dplyr", "readr", "tibble")
+required_pkgs <- c(
+  "terra", "sf", "dplyr", "readr", "tibble"
+)
+
 missing_pkgs <- required_pkgs[
-  !vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)
+  !vapply(
+    required_pkgs,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
 ]
 
 if (length(missing_pkgs) > 0) {
   stop(
     "Missing packages: ",
-    paste(missing_pkgs, collapse = ", "),
-    ". Install them before running this script."
+    paste(missing_pkgs, collapse = ", ")
   )
 }
 
+library(terra)
 library(sf)
 library(dplyr)
 library(readr)
@@ -71,28 +86,284 @@ dir.create(input_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(audit_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(work_dir, recursive = TRUE, showWarnings = FALSE)
 
+# ------------------------------------------------------------
+# 1B. CLEAN OBSOLETE REV2 AUDIT ARTIFACTS
+# ------------------------------------------------------------
+
+obsolete_scripts <- file.path(
+  rev2_dir,
+  "02_scripts",
+  c(
+    "03_reconcile_Ribotta_with_REV1_CORRECTED.R",
+    "04_trace_missing_Ribotta_cells.R",
+    "05_audit_Ribotta_geography_by_country.R"
+  )
+)
+
+obsolete_audit_patterns <- c(
+  "^03[A-I]_",
+  "^04[A-F]_",
+  "^05[A-I]_",
+  "^REV2_AUDIT_SUMMARY_STAGE1\\.csv$"
+)
+
+obsolete_audit_files <- list.files(
+  audit_dir,
+  full.names = TRUE
+)
+
+if (length(obsolete_audit_files) > 0) {
+  obsolete_audit_files <- obsolete_audit_files[
+    Reduce(
+      `|`,
+      lapply(
+        obsolete_audit_patterns,
+        function(p) grepl(p, basename(obsolete_audit_files))
+      )
+    )
+  ]
+}
+
+obsolete_work_files <- file.path(
+  work_dir,
+  c(
+    "03_Ribotta_REV1_reconciliation.rds",
+    "04_missing_Ribotta_cells_trace.rds",
+    "05_Ribotta_geography_audit.rds"
+  )
+)
+
+obsolete_files <- unique(
+  c(
+    obsolete_scripts,
+    obsolete_audit_files,
+    obsolete_work_files
+  )
+)
+
+obsolete_files <- obsolete_files[
+  file.exists(obsolete_files)
+]
+
+if (length(obsolete_files) > 0) {
+  unlink(
+    obsolete_files,
+    recursive = TRUE,
+    force = TRUE
+  )
+}
+
+cat(
+  "\nRemoved obsolete REV2 audit artifacts:",
+  length(obsolete_files),
+  "\n"
+)
+
 rdata_revision <- file.path(
   rev1_dir,
   "dati_per_revisione.RData"
 )
 
 if (!file.exists(rdata_revision)) {
-  stop("Cannot find REV1 RData: ", rdata_revision)
+  stop(
+    "Cannot find REV1 RData: ",
+    rdata_revision
+  )
 }
 
 # ------------------------------------------------------------
-# 2. Load REV1 objects in a private environment
+# 2. Locate the OFFICIAL REV1 European current-climate raster
 # ------------------------------------------------------------
 
-rev1 <- new.env(parent = baseenv())
-load(rdata_revision, envir = rev1)
+climate_candidates <- list.files(
+  rev1_dir,
+  pattern = "^current_europe_coast1km_selectedvars\\.tif$",
+  recursive = TRUE,
+  full.names = TRUE,
+  ignore.case = TRUE
+)
 
-get_rev1 <- function(name, required = TRUE) {
-  if (!exists(name, envir = rev1, inherits = FALSE)) {
-    if (required) stop("Required REV1 object not found: ", name)
+if (length(climate_candidates) == 0) {
+  stop(
+    "Could not find current_europe_coast1km_selectedvars.tif ",
+    "inside the REV1 archive. This file is required because it ",
+    "is the source used to reconstruct the official REV1 valid ",
+    "European coastal mask."
+  )
+}
+
+# Prefer the path matching the official pipeline layout.
+preferred <- grep(
+  "data_raw[/\\\\]climate_chelsa[/\\\\]current",
+  climate_candidates,
+  ignore.case = TRUE
+)
+
+if (length(preferred) >= 1) {
+  climate_file <- climate_candidates[preferred[1]]
+} else {
+  climate_file <- climate_candidates[1]
+}
+
+cat(
+  "\nOfficial REV1 current European raster:\n",
+  climate_file,
+  "\n",
+  sep = ""
+)
+
+bio_eu <- terra::rast(
+  climate_file
+)
+
+candidate_vars <- c(
+  "bio3", "bio8", "bio9", "bio10",
+  "bio15", "bio18", "bio19",
+  "fcf", "gsl", "gst"
+)
+
+available_vars <- intersect(
+  candidate_vars,
+  names(bio_eu)
+)
+
+if (length(available_vars) == 0) {
+  stop(
+    "None of the expected current predictor layers were found. ",
+    "Raster layers are: ",
+    paste(names(bio_eu), collapse = ", ")
+  )
+}
+
+cat(
+  "\nCurrent predictor layers used for mask reconstruction:\n"
+)
+
+print(
+  available_vars
+)
+
+# ------------------------------------------------------------
+# 3. Rebuild the exact complete-data valid coastal mask
+# ------------------------------------------------------------
+
+build_complete_mask <- function(r, vars) {
+
+  vars <- intersect(
+    vars,
+    names(r)
+  )
+
+  if (length(vars) == 0) {
+    stop("No candidate variables available for mask construction.")
+  }
+
+  mask <- !is.na(
+    r[[vars[1]]]
+  )
+
+  if (length(vars) > 1) {
+
+    for (v in vars[-1]) {
+      mask <- mask &
+        !is.na(
+          r[[v]]
+        )
+    }
+  }
+
+  terra::ifel(
+    mask,
+    1,
+    NA
+  )
+}
+
+valid_eu_mask <- build_complete_mask(
+  bio_eu,
+  candidate_vars
+)
+
+n_valid_cells <- as.integer(
+  terra::global(
+    valid_eu_mask,
+    "sum",
+    na.rm = TRUE
+  )[1, 1]
+)
+
+cat(
+  "\nReconstructed raster-valid European coastal cells:",
+  n_valid_cells,
+  "\n"
+)
+
+# This should reproduce the REV1 final domain count.
+expected_domain_cells <- 79579L
+
+domain_count_matches_REV1 <-
+  identical(
+    n_valid_cells,
+    expected_domain_cells
+  )
+
+cat(
+  "Matches REV1 expected 79,579 cells:",
+  domain_count_matches_REV1,
+  "\n"
+)
+
+if (!domain_count_matches_REV1) {
+
+  warning(
+    "The reconstructed mask contains ",
+    n_valid_cells,
+    " cells rather than the expected 79,579. ",
+    "Results should not be interpreted until this discrepancy is resolved."
+  )
+}
+
+# ------------------------------------------------------------
+# 4. Load REV1 occurrence stages
+# ------------------------------------------------------------
+
+rev1 <- new.env(
+  parent = baseenv()
+)
+
+load(
+  rdata_revision,
+  envir = rev1
+)
+
+get_rev1 <- function(
+  name,
+  required = TRUE
+) {
+
+  if (
+    !exists(
+      name,
+      envir = rev1,
+      inherits = FALSE
+    )
+  ) {
+
+    if (required) {
+      stop(
+        "Required REV1 object not found: ",
+        name
+      )
+    }
+
     return(NULL)
   }
-  get(name, envir = rev1, inherits = FALSE)
+
+  get(
+    name,
+    envir = rev1,
+    inherits = FALSE
+  )
 }
 
 flagged  <- get_rev1("flagged")
@@ -100,153 +371,22 @@ clean    <- get_rev1("clean")
 coastal  <- get_rev1("coastal")
 main_occ <- get_rev1("main_occ")
 occ      <- get_rev1("occ")
-eu_df    <- get_rev1("eu_df")
+world    <- get_rev1("world", required = FALSE)
 
-world_eu <- get_rev1("world_eu", required = FALSE)
-if (is.null(world_eu)) {
-  world_eu <- get_rev1("world", required = FALSE)
+if (!"cell_id" %in% names(coastal)) {
+  stop("REV1 object 'coastal' does not contain cell_id.")
+}
+
+if (!"cell_id" %in% names(main_occ)) {
+  stop("REV1 object 'main_occ' does not contain cell_id.")
+}
+
+if (!"cell_id" %in% names(occ)) {
+  stop("REV1 object 'occ' does not contain cell_id.")
 }
 
 # ------------------------------------------------------------
-# 3. Helper functions
-# ------------------------------------------------------------
-
-pick_col <- function(df, candidates, required = TRUE) {
-
-  nms <- names(df)
-
-  for (candidate in candidates) {
-    hit <- which(tolower(nms) == tolower(candidate))
-    if (length(hit) > 0) return(nms[hit[1]])
-  }
-
-  for (candidate in candidates) {
-    hit <- grep(candidate, nms, ignore.case = TRUE, value = TRUE)
-    if (length(hit) > 0) return(hit[1])
-  }
-
-  if (required) {
-    stop(
-      "Could not identify required column. Candidates: ",
-      paste(candidates, collapse = ", "),
-      "\nAvailable fields: ",
-      paste(nms, collapse = ", ")
-    )
-  }
-
-  NA_character_
-}
-
-make_sf_points <- function(df, label) {
-
-  lon_col <- pick_col(
-    df,
-    c(
-      "decimal_longitude",
-      "decimallongitude",
-      "longitude",
-      "lon",
-      "x"
-    )
-  )
-
-  lat_col <- pick_col(
-    df,
-    c(
-      "decimal_latitude",
-      "decimallatitude",
-      "latitude",
-      "lat",
-      "y"
-    )
-  )
-
-  lon <- suppressWarnings(as.numeric(df[[lon_col]]))
-  lat <- suppressWarnings(as.numeric(df[[lat_col]]))
-
-  ok <- is.finite(lon) &
-    is.finite(lat) &
-    abs(lon) <= 180 &
-    abs(lat) <= 90
-
-  if (!any(ok)) {
-    stop(label, ": no valid longitude/latitude values found.")
-  }
-
-  out <- df[ok, , drop = FALSE]
-  out$.source_row <- which(ok)
-  out$.lon <- lon[ok]
-  out$.lat <- lat[ok]
-
-  sf::st_as_sf(
-    out,
-    coords = c(".lon", ".lat"),
-    crs = 4326,
-    remove = FALSE
-  )
-}
-
-nearest_distance <- function(query_sf, target_sf, prefix) {
-
-  q <- sf::st_transform(query_sf, 3035)
-  t <- sf::st_transform(target_sf, 3035)
-
-  idx <- sf::st_nearest_feature(q, t)
-
-  dist <- as.numeric(
-    sf::st_distance(
-      q,
-      t[idx, ],
-      by_element = TRUE
-    )
-  )
-
-  tibble(
-    !!paste0(prefix, "_nearest_index") := idx,
-    !!paste0(prefix, "_distance_m") := dist
-  )
-}
-
-normalize_country_code <- function(x) {
-
-  y <- toupper(trimws(as.character(x)))
-
-  y[y %in% c("UNITED KINGDOM", "GREAT BRITAIN", "UK")] <- "GB"
-  y[y %in% c("FRANCE", "FRENCH REPUBLIC")] <- "FR"
-  y[y %in% c("ITALY", "ITALIA")] <- "IT"
-  y[y %in% c("SPAIN", "ESPAÑA", "ESPANA")] <- "ES"
-  y[y == "PORTUGAL"] <- "PT"
-  y[y == "GREECE"] <- "GR"
-  y[y == "CROATIA"] <- "HR"
-  y[y == "SLOVENIA"] <- "SI"
-  y[y == "MONTENEGRO"] <- "ME"
-  y[y == "ALBANIA"] <- "AL"
-  y[y %in% c("TURKEY", "TÜRKIYE", "TURKIYE")] <- "TR"
-  y[y == "BULGARIA"] <- "BG"
-  y[y == "ROMANIA"] <- "RO"
-  y[y == "CYPRUS"] <- "CY"
-  y[y == "MALTA"] <- "MT"
-
-  y
-}
-
-region_group <- function(code) {
-
-  dplyr::case_when(
-    code == "GB" ~ "United Kingdom",
-    code == "FR" ~ "France",
-    code == "IT" ~ "Italy",
-    code %in% c(
-      "ES", "PT", "FR", "IT", "SI", "HR", "BA",
-      "ME", "AL", "GR", "TR", "CY", "MT", "MC"
-    ) ~ "Mediterranean",
-    code %in% c("RO", "BG", "TR", "UA", "GE", "RU") ~ "Black Sea",
-    TRUE ~ "Other Europe"
-  )
-}
-
-# ------------------------------------------------------------
-# 4. Locate the Sara/Ribotta shapefile
+# 5. Locate and read Sara/Ribotta shapefile
 # ------------------------------------------------------------
 
 shp_files <- list.files(
@@ -259,7 +399,7 @@ shp_files <- list.files(
 
 if (length(shp_files) == 0) {
 
-  zip_candidates <- list.files(
+  zip_files <- list.files(
     rev2_dir,
     pattern = "\\.zip$",
     recursive = FALSE,
@@ -267,29 +407,31 @@ if (length(shp_files) == 0) {
     ignore.case = TRUE
   )
 
-  if (length(zip_candidates) == 0) {
-    stop("No Sara/Ribotta shapefile or ZIP archive found.")
+  if (length(zip_files) == 0) {
+    stop(
+      "No Sara/Ribotta shapefile or ZIP file was found."
+    )
   }
 
-  sara_extract_dir <- file.path(
+  sara_dir <- file.path(
     input_dir,
-    "Sara_Ribotta2021"
+    "sara_ribotta"
   )
 
   dir.create(
-    sara_extract_dir,
+    sara_dir,
     recursive = TRUE,
     showWarnings = FALSE
   )
 
   unzip(
-    zip_candidates[1],
-    exdir = sara_extract_dir,
+    zip_files[1],
+    exdir = sara_dir,
     overwrite = TRUE
   )
 
   shp_files <- list.files(
-    sara_extract_dir,
+    sara_dir,
     pattern = "\\.shp$",
     recursive = TRUE,
     full.names = TRUE,
@@ -298,40 +440,57 @@ if (length(shp_files) == 0) {
 }
 
 if (length(shp_files) == 0) {
-  stop("No .shp file found after extraction.")
+  stop(
+    "No shapefile found for Sara/Ribotta data."
+  )
 }
 
-shp_inventory <- lapply(
+# Select the shapefile with the greatest number of features.
+shp_info <- lapply(
   shp_files,
   function(f) {
 
     x <- try(
-      sf::st_read(f, quiet = TRUE),
+      sf::st_read(
+        f,
+        quiet = TRUE
+      ),
       silent = TRUE
     )
 
-    if (inherits(x, "try-error")) return(NULL)
+    if (inherits(x, "try-error")) {
+      return(NULL)
+    }
 
     tibble(
       file = f,
-      n = nrow(x),
-      geometry = paste(
-        unique(as.character(sf::st_geometry_type(x))),
-        collapse = ";"
-      )
+      n_features = nrow(x)
     )
   }
 )
 
-shp_inventory <- dplyr::bind_rows(shp_inventory)
+shp_info <- bind_rows(
+  shp_info
+)
 
-if (nrow(shp_inventory) == 0) {
-  stop("All shapefiles failed to read.")
+if (nrow(shp_info) == 0) {
+  stop(
+    "No readable Sara/Ribotta shapefile found."
+  )
 }
 
-sara_file <- shp_inventory$file[
-  which.max(shp_inventory$n)
+sara_file <- shp_info$file[
+  which.max(
+    shp_info$n_features
+  )
 ]
+
+cat(
+  "\nSara/Ribotta shapefile:\n",
+  sara_file,
+  "\n",
+  sep = ""
+)
 
 sara_raw <- sf::st_read(
   sara_file,
@@ -339,7 +498,9 @@ sara_raw <- sf::st_read(
 )
 
 if (is.na(sf::st_crs(sara_raw))) {
-  stop("Sara/Ribotta shapefile has no CRS.")
+  stop(
+    "Sara/Ribotta shapefile has no declared CRS."
+  )
 }
 
 sara_raw <- sf::st_transform(
@@ -354,77 +515,314 @@ sara <- suppressWarnings(
   )
 )
 
-sara$sara_id <- seq_len(nrow(sara))
+sara$sara_id <- seq_len(
+  nrow(sara)
+)
 
-sara_xy <- sf::st_coordinates(sara)
+sara_xy <- sf::st_coordinates(
+  sara
+)
+
 sara$sara_lon <- sara_xy[, "X"]
 sara$sara_lat <- sara_xy[, "Y"]
 
 # ------------------------------------------------------------
-# 5. Spatial objects for REV1 stages
+# 6. Assign Sara points to the official REV1 valid coastal mask
+#    using the SAME rule as the REV1 pipeline
 # ------------------------------------------------------------
 
-flagged_sf <- make_sf_points(flagged, "flagged")
-clean_sf   <- make_sf_points(clean, "clean")
-coastal_sf <- make_sf_points(coastal, "coastal")
-main_sf    <- make_sf_points(main_occ, "main_occ")
-occ_sf     <- make_sf_points(occ, "occ")
-eu_sf      <- make_sf_points(eu_df, "eu_df")
-
-eu_sf$domain_cell_id <- seq_len(nrow(eu_sf))
-
-# ------------------------------------------------------------
-# 6. Country assignment
-# ------------------------------------------------------------
-
-sara$country_code <- NA_character_
-sara$country_name <- NA_character_
-
-if (
-  !is.null(world_eu) &&
-  inherits(world_eu, "sf")
+assign_to_valid_mask <- function(
+  points_sf,
+  mask_rast,
+  max_snap_m = 1500
 ) {
 
-  world_poly <- sf::st_transform(
-    world_eu,
+  xy <- sf::st_coordinates(
+    points_sf
+  )
+
+  cell_guess <- terra::cellFromXY(
+    mask_rast,
+    xy
+  )
+
+  mask_vals <- terra::values(
+    mask_rast,
+    mat = FALSE
+  )
+
+  exact_ok <-
+    !is.na(cell_guess) &
+    !is.na(mask_vals[cell_guess])
+
+  out <- tibble(
+    point_row = seq_len(
+      nrow(points_sf)
+    ),
+
+    exact_cell_guess =
+      cell_guess,
+
+    exact_valid =
+      exact_ok,
+
+    assigned_cell_id =
+      NA_integer_,
+
+    assigned_lon =
+      NA_real_,
+
+    assigned_lat =
+      NA_real_,
+
+    snap_distance_m =
+      NA_real_,
+
+    snap_type =
+      NA_character_
+  )
+
+  # Exact valid cells
+  if (any(exact_ok)) {
+
+    exact_cells <- cell_guess[
+      exact_ok
+    ]
+
+    exact_xy <- terra::xyFromCell(
+      mask_rast,
+      exact_cells
+    )
+
+    out$assigned_cell_id[
+      exact_ok
+    ] <- exact_cells
+
+    out$assigned_lon[
+      exact_ok
+    ] <- exact_xy[, 1]
+
+    out$assigned_lat[
+      exact_ok
+    ] <- exact_xy[, 2]
+
+    out$snap_distance_m[
+      exact_ok
+    ] <- 0
+
+    out$snap_type[
+      exact_ok
+    ] <- "exact_valid_cell"
+  }
+
+  # Nearest valid cell for points outside the valid mask
+  remaining <- which(
+    !exact_ok
+  )
+
+  if (length(remaining) > 0) {
+
+    valid_df <- terra::as.data.frame(
+      mask_rast,
+      xy = TRUE,
+      cells = TRUE,
+      na.rm = TRUE
+    )
+
+    valid_df <- valid_df[
+      ,
+      c(
+        "cell",
+        "x",
+        "y"
+      )
+    ]
+
+    valid_sf <- sf::st_as_sf(
+      valid_df,
+      coords = c("x", "y"),
+      crs = 4326
+    )
+
+    rem_sf <- points_sf[
+      remaining,
+    ]
+
+    # Use the same projected CRS used in the REV1 snapping function.
+    valid_m <- sf::st_transform(
+      valid_sf,
+      3857
+    )
+
+    rem_m <- sf::st_transform(
+      rem_sf,
+      3857
+    )
+
+    idx <- sf::st_nearest_feature(
+      rem_m,
+      valid_m
+    )
+
+    d <- as.numeric(
+      sf::st_distance(
+        rem_m,
+        valid_m[idx, ],
+        by_element = TRUE
+      )
+    )
+
+    keep <- is.finite(d) &
+      d <= max_snap_m
+
+    if (any(keep)) {
+
+      retained_rows <- remaining[
+        keep
+      ]
+
+      valid_idx <- idx[
+        keep
+      ]
+
+      out$assigned_cell_id[
+        retained_rows
+      ] <- valid_df$cell[
+        valid_idx
+      ]
+
+      out$assigned_lon[
+        retained_rows
+      ] <- valid_df$x[
+        valid_idx
+      ]
+
+      out$assigned_lat[
+        retained_rows
+      ] <- valid_df$y[
+        valid_idx
+      ]
+
+      out$snap_distance_m[
+        retained_rows
+      ] <- d[
+        keep
+      ]
+
+      out$snap_type[
+        retained_rows
+      ] <- "nearest_valid_cell"
+    }
+
+    # Keep actual nearest distance even when > 1500 m for audit.
+    not_kept <- !keep
+
+    if (any(not_kept)) {
+
+      rejected_rows <- remaining[
+        not_kept
+      ]
+
+      out$snap_distance_m[
+        rejected_rows
+      ] <- d[
+        not_kept
+      ]
+
+      out$snap_type[
+        rejected_rows
+      ] <- "outside_1500m"
+    }
+  }
+
+  out$retained_by_REV1_spatial_rule <-
+    !is.na(
+      out$assigned_cell_id
+    )
+
+  out
+}
+
+sara_assignment <- assign_to_valid_mask(
+  sara,
+  valid_eu_mask,
+  max_snap_m = 1500
+)
+
+sara_df <- bind_cols(
+  sf::st_drop_geometry(
+    sara
+  ),
+  sara_assignment %>%
+    select(
+      -point_row
+    )
+)
+
+# ------------------------------------------------------------
+# 7. Country assignment from the REV1 world polygons
+# ------------------------------------------------------------
+
+sara_df$country_code <- NA_character_
+sara_df$country_name <- NA_character_
+
+if (
+  !is.null(world) &&
+  inherits(world, "sf")
+) {
+
+  world_4326 <- sf::st_transform(
+    world,
     4326
   )
 
-  world_att <- sf::st_drop_geometry(
-    world_poly
+  world_names <- names(
+    world_4326
   )
 
-  code_col <- pick_col(
-    world_att,
-    c(
-      "iso_a2",
-      "countrycode",
-      "country_code",
-      "adm0_a3"
-    ),
-    required = FALSE
+  code_candidates <- c(
+    "iso_a2",
+    "ISO_A2",
+    "adm0_a3",
+    "ADM0_A3"
   )
 
-  name_col <- pick_col(
-    world_att,
-    c(
-      "admin",
-      "name",
-      "country",
-      "sovereignt"
-    ),
-    required = FALSE
+  name_candidates <- c(
+    "admin",
+    "ADMIN",
+    "name",
+    "NAME"
   )
 
-  keep_cols <- c(code_col, name_col)
-  keep_cols <- keep_cols[!is.na(keep_cols)]
+  code_col <- code_candidates[
+    code_candidates %in%
+      world_names
+  ][1]
 
-  if (length(keep_cols) > 0) {
+  name_col <- name_candidates[
+    name_candidates %in%
+      world_names
+  ][1]
+
+  keep <- c(
+    code_col,
+    name_col
+  )
+
+  keep <- keep[
+    !is.na(keep)
+  ]
+
+  if (length(keep) > 0) {
 
     joined <- suppressWarnings(
       sf::st_join(
         sara,
-        world_poly[, keep_cols, drop = FALSE],
+        world_4326[
+          ,
+          keep,
+          drop = FALSE
+        ],
         left = TRUE,
         join = sf::st_intersects
       )
@@ -432,624 +830,685 @@ if (
 
     if (
       !is.na(code_col) &&
-      code_col %in% names(joined)
+      code_col %in%
+        names(joined)
     ) {
-      sara$country_code <- normalize_country_code(
-        joined[[code_col]]
-      )
+
+      sara_df$country_code <-
+        as.character(
+          joined[[code_col]]
+        )
     }
 
     if (
       !is.na(name_col) &&
-      name_col %in% names(joined)
+      name_col %in%
+        names(joined)
     ) {
-      sara$country_name <- as.character(
-        joined[[name_col]]
-      )
+
+      sara_df$country_name <-
+        as.character(
+          joined[[name_col]]
+        )
     }
   }
 }
 
-flag_country_col <- pick_col(
-  flagged,
-  c(
-    "countryCode",
-    "country_code",
-    "country",
-    "countrycode"
-  ),
-  required = FALSE
-)
-
 # ------------------------------------------------------------
-# 7. Point-level reconciliation
+# 8. Compare assigned cells directly with REV1 occurrence cells
 # ------------------------------------------------------------
 
-near_flagged <- nearest_distance(
-  sara,
-  flagged_sf,
-  "flagged"
+old_coastal_cells <- unique(
+  coastal$cell_id
 )
 
-near_clean <- nearest_distance(
-  sara,
-  clean_sf,
-  "clean"
+corrected_allrange_cells <- unique(
+  main_occ$cell_id
 )
 
-near_coastal <- nearest_distance(
-  sara,
-  coastal_sf,
-  "coastal"
+final_invaded_cells <- unique(
+  occ$cell_id
 )
 
-near_main <- nearest_distance(
-  sara,
-  main_sf,
-  "main"
+sara_df$cell_in_old_coastal <-
+  sara_df$assigned_cell_id %in%
+  old_coastal_cells
+
+sara_df$cell_in_corrected_allrange <-
+  sara_df$assigned_cell_id %in%
+  corrected_allrange_cells
+
+sara_df$cell_in_final_invaded <-
+  sara_df$assigned_cell_id %in%
+  final_invaded_cells
+
+# ------------------------------------------------------------
+# 9. Nearest raw GBIF distance
+#    Used only for provenance / independent-field-data audit.
+# ------------------------------------------------------------
+
+lon_candidates <- c(
+  "decimal_longitude",
+  "decimalLongitude",
+  "longitude",
+  "lon"
 )
 
-near_final <- nearest_distance(
-  sara,
-  occ_sf,
-  "final"
+lat_candidates <- c(
+  "decimal_latitude",
+  "decimalLatitude",
+  "latitude",
+  "lat"
 )
 
-near_domain <- nearest_distance(
-  sara,
-  eu_sf,
-  "domain"
-)
+lon_col <- lon_candidates[
+  lon_candidates %in%
+    names(flagged)
+][1]
 
-point_audit <- dplyr::bind_cols(
-  sf::st_drop_geometry(sara),
-  near_flagged,
-  near_clean,
-  near_coastal,
-  near_main,
-  near_final,
-  near_domain
-)
+lat_col <- lat_candidates[
+  lat_candidates %in%
+    names(flagged)
+][1]
 
-if (!is.na(flag_country_col)) {
+if (
+  is.na(lon_col) ||
+  is.na(lat_col)
+) {
 
-  borrow <- (
-    is.na(point_audit$country_code) |
-      point_audit$country_code == ""
-  ) &
-    is.finite(point_audit$flagged_distance_m) &
-    point_audit$flagged_distance_m <= 1000
-
-  if (any(borrow)) {
-
-    nearest_country <- flagged[[flag_country_col]][
-      point_audit$flagged_nearest_index[borrow]
-    ]
-
-    point_audit$country_code[borrow] <-
-      normalize_country_code(
-        nearest_country
-      )
-  }
+  stop(
+    "Could not identify longitude/latitude fields in REV1 flagged data."
+  )
 }
 
-point_audit$region_group <-
-  region_group(
-    point_audit$country_code
+flag_lon <- suppressWarnings(
+  as.numeric(
+    flagged[[lon_col]]
   )
-
-# The REV1 rule allowed assignment to the nearest raster-valid coastal
-# cell when the occurrence was within 1,500 m.
-
-point_audit$within_valid_coastal_domain <-
-  is.finite(point_audit$domain_distance_m) &
-  point_audit$domain_distance_m <= 1500
-
-point_audit$domain_cell_id <- ifelse(
-  point_audit$within_valid_coastal_domain,
-  eu_sf$domain_cell_id[
-    point_audit$domain_nearest_index
-  ],
-  NA_integer_
 )
 
-point_audit$gbif_within_100m <-
-  point_audit$flagged_distance_m <= 100
-
-point_audit$gbif_within_500m <-
-  point_audit$flagged_distance_m <= 500
-
-point_audit$gbif_within_1km <-
-  point_audit$flagged_distance_m <= 1000
-
-point_audit$gbif_within_5km <-
-  point_audit$flagged_distance_m <= 5000
-
-point_audit$old_clean_within_1km <-
-  point_audit$clean_distance_m <= 1000
-
-point_audit$old_coastal_within_1km <-
-  point_audit$coastal_distance_m <= 1000
-
-point_audit$corrected_allrange_within_1km <-
-  point_audit$main_distance_m <= 1000
-
-point_audit$final_invaded_within_1km <-
-  point_audit$final_distance_m <= 1000
-
-point_audit$final_invaded_within_5km <-
-  point_audit$final_distance_m <= 5000
-
-point_audit$candidate_nonGBIF_point <-
-  point_audit$within_valid_coastal_domain &
-  (
-    is.na(point_audit$gbif_within_1km) |
-      !point_audit$gbif_within_1km
+flag_lat <- suppressWarnings(
+  as.numeric(
+    flagged[[lat_col]]
   )
-
-# ------------------------------------------------------------
-# 8. Reconstruct final REV1 invaded cells
-# ------------------------------------------------------------
-
-occ_to_domain <- nearest_distance(
-  occ_sf,
-  eu_sf,
-  "domain"
 )
 
-occ_cells <- tibble(
-  occ_row = seq_len(nrow(occ_sf)),
-  domain_distance_m =
-    occ_to_domain$domain_distance_m,
-  domain_cell_id =
-    eu_sf$domain_cell_id[
-      occ_to_domain$domain_nearest_index
-    ]
-) %>%
+flag_ok <-
+  is.finite(flag_lon) &
+  is.finite(flag_lat) &
+  abs(flag_lon) <= 180 &
+  abs(flag_lat) <= 90
+
+flagged_spatial <- flagged[
+  flag_ok,
+  ,
+  drop = FALSE
+]
+
+flagged_spatial$.flagged_row_original <-
+  which(flag_ok)
+
+flagged_spatial$.lon <-
+  flag_lon[
+    flag_ok
+  ]
+
+flagged_spatial$.lat <-
+  flag_lat[
+    flag_ok
+  ]
+
+flagged_sf <- sf::st_as_sf(
+  flagged_spatial,
+  coords = c(
+    ".lon",
+    ".lat"
+  ),
+  crs = 4326,
+  remove = FALSE
+)
+
+sara_m <- sf::st_transform(
+  sara,
+  3035
+)
+
+flagged_m <- sf::st_transform(
+  flagged_sf,
+  3035
+)
+
+nearest_idx <- sf::st_nearest_feature(
+  sara_m,
+  flagged_m
+)
+
+nearest_dist <- as.numeric(
+  sf::st_distance(
+    sara_m,
+    flagged_m[
+      nearest_idx,
+    ],
+    by_element = TRUE
+  )
+)
+
+sara_df$nearest_flagged_distance_m <-
+  nearest_dist
+
+sara_df$nearest_flagged_original_row <-
+  flagged_spatial$.flagged_row_original[
+    nearest_idx
+  ]
+
+# ------------------------------------------------------------
+# 10. Point-level status
+# ------------------------------------------------------------
+
+sara_df$gbif_match_100m <-
+  sara_df$nearest_flagged_distance_m <= 100
+
+sara_df$gbif_match_1km <-
+  sara_df$nearest_flagged_distance_m <= 1000
+
+sara_df$gbif_match_5km <-
+  sara_df$nearest_flagged_distance_m <= 5000
+
+sara_df$potential_independent_field_record <-
+  sara_df$retained_by_REV1_spatial_rule &
+  !sara_df$gbif_match_1km
+
+# ------------------------------------------------------------
+# 11. Cell-level reconciliation
+# ------------------------------------------------------------
+
+sara_valid <- sara_df %>%
   filter(
-    is.finite(domain_distance_m),
-    domain_distance_m <= 1500
-  )
-
-final_cells <- sort(
-  unique(
-    occ_cells$domain_cell_id
-  )
-)
-
-point_audit$cell_represented_in_final_REV1 <-
-  point_audit$domain_cell_id %in%
-  final_cells
-
-point_audit$sara_adds_new_cell_vs_REV1 <-
-  point_audit$within_valid_coastal_domain &
-  !point_audit$cell_represented_in_final_REV1
-
-# ------------------------------------------------------------
-# 9. Cell-level reconciliation
-# ------------------------------------------------------------
-
-sara_valid <- point_audit %>%
-  filter(
-    within_valid_coastal_domain,
-    !is.na(domain_cell_id)
+    retained_by_REV1_spatial_rule,
+    !is.na(
+      assigned_cell_id
+    )
   )
 
 cell_audit <- sara_valid %>%
-  group_by(domain_cell_id) %>%
+  group_by(
+    assigned_cell_id
+  ) %>%
   summarise(
     n_sara_points = n(),
 
-    min_gbif_distance_m =
-      suppressWarnings(
-        min(
-          flagged_distance_m,
-          na.rm = TRUE
-        )
-      ),
-
-    any_gbif_within_100m =
-      any(
-        gbif_within_100m,
-        na.rm = TRUE
-      ),
-
-    any_gbif_within_500m =
-      any(
-        gbif_within_500m,
-        na.rm = TRUE
-      ),
-
-    any_gbif_within_1km =
-      any(
-        gbif_within_1km,
-        na.rm = TRUE
-      ),
-
-    any_old_clean_within_1km =
-      any(
-        old_clean_within_1km,
-        na.rm = TRUE
-      ),
-
-    any_old_coastal_within_1km =
-      any(
-        old_coastal_within_1km,
-        na.rm = TRUE
-      ),
-
-    any_final_invaded_within_1km =
-      any(
-        final_invaded_within_1km,
-        na.rm = TRUE
-      ),
-
     country_code =
-      dplyr::first(
+      first(
         country_code[
-          !is.na(country_code) &
-            country_code != ""
+          !is.na(country_code)
         ],
         default = NA_character_
       ),
 
-    region_group =
-      dplyr::first(
-        region_group[
-          !is.na(region_group) &
-            region_group != ""
+    country_name =
+      first(
+        country_name[
+          !is.na(country_name)
         ],
         default = NA_character_
+      ),
+
+    min_GBIF_distance_m =
+      min(
+        nearest_flagged_distance_m,
+        na.rm = TRUE
+      ),
+
+    cell_in_old_coastal =
+      any(
+        cell_in_old_coastal
+      ),
+
+    cell_in_corrected_allrange =
+      any(
+        cell_in_corrected_allrange
+      ),
+
+    cell_in_final_invaded =
+      any(
+        cell_in_final_invaded
       ),
 
     .groups = "drop"
-  ) %>%
-  mutate(
-    represented_in_final_REV1 =
-      domain_cell_id %in% final_cells,
-
-    sara_only_cell =
-      !represented_in_final_REV1,
-
-    candidate_independent_cell =
-      sara_only_cell &
-      !any_gbif_within_1km
   )
 
-cell_audit$min_gbif_distance_m[
+cell_audit$min_GBIF_distance_m[
   !is.finite(
-    cell_audit$min_gbif_distance_m
+    cell_audit$min_GBIF_distance_m
   )
 ] <- NA_real_
 
+cell_audit$sara_cell_absent_final <-
+  !cell_audit$cell_in_final_invaded
+
+cell_audit$potential_independent_cell <-
+  cell_audit$sara_cell_absent_final &
+  (
+    is.na(
+      cell_audit$min_GBIF_distance_m
+    ) |
+    cell_audit$min_GBIF_distance_m > 1000
+  )
+
 # ------------------------------------------------------------
-# 10. Country and regional summaries
+# 12. Country summaries
 # ------------------------------------------------------------
 
-country_summary <- cell_audit %>%
+point_country_summary <- sara_df %>%
   mutate(
-    country_code = ifelse(
-      is.na(country_code) |
-        country_code == "",
-      "UNRESOLVED",
-      country_code
-    )
+    country_code =
+      ifelse(
+        is.na(country_code) |
+          country_code == "",
+        "UNRESOLVED",
+        country_code
+      ),
+
+    country_name =
+      ifelse(
+        is.na(country_name) |
+          country_name == "",
+        country_code,
+        country_name
+      )
   ) %>%
-  group_by(country_code) %>%
+  group_by(
+    country_code,
+    country_name
+  ) %>%
   summarise(
-    sara_points =
-      sum(n_sara_points),
+    n_sara_points = n(),
 
-    sara_unique_valid_coastal_cells =
-      n(),
-
-    cells_already_in_final_REV1 =
+    exact_valid_points =
       sum(
-        represented_in_final_REV1
+        exact_valid,
+        na.rm = TRUE
       ),
 
-    sara_only_cells =
+    snapped_within_1500m =
       sum(
-        sara_only_cell
+        snap_type ==
+          "nearest_valid_cell",
+        na.rm = TRUE
       ),
 
-    candidate_independent_cells =
+    retained_by_REV1_spatial_rule =
       sum(
-        candidate_independent_cell
+        retained_by_REV1_spatial_rule,
+        na.rm = TRUE
+      ),
+
+    outside_1500m =
+      sum(
+        !retained_by_REV1_spatial_rule,
+        na.rm = TRUE
+      ),
+
+    GBIF_within_100m =
+      sum(
+        gbif_match_100m,
+        na.rm = TRUE
+      ),
+
+    GBIF_within_1km =
+      sum(
+        gbif_match_1km,
+        na.rm = TRUE
+      ),
+
+    final_REV1_cell =
+      sum(
+        retained_by_REV1_spatial_rule &
+          cell_in_final_invaded,
+        na.rm = TRUE
       ),
 
     .groups = "drop"
   ) %>%
   arrange(
     desc(
-      sara_unique_valid_coastal_cells
+      n_sara_points
     )
   )
 
-regional_summary <- cell_audit %>%
+cell_country_summary <- cell_audit %>%
   mutate(
-    region_group = ifelse(
-      is.na(region_group) |
-        region_group == "",
-      "Unresolved",
-      region_group
-    )
-  ) %>%
-  group_by(region_group) %>%
-  summarise(
-    sara_points =
-      sum(n_sara_points),
+    country_code =
+      ifelse(
+        is.na(country_code) |
+          country_code == "",
+        "UNRESOLVED",
+        country_code
+      ),
 
-    sara_unique_valid_coastal_cells =
+    country_name =
+      ifelse(
+        is.na(country_name) |
+          country_name == "",
+        country_code,
+        country_name
+      )
+  ) %>%
+  group_by(
+    country_code,
+    country_name
+  ) %>%
+  summarise(
+    n_unique_Sara_valid_cells =
       n(),
 
-    cells_already_in_final_REV1 =
+    n_cells_in_final_REV1 =
       sum(
-        represented_in_final_REV1
+        cell_in_final_invaded,
+        na.rm = TRUE
       ),
 
-    sara_only_cells =
+    n_cells_absent_final_REV1 =
       sum(
-        sara_only_cell
+        sara_cell_absent_final,
+        na.rm = TRUE
       ),
 
-    candidate_independent_cells =
+    n_potential_independent_cells =
       sum(
-        candidate_independent_cell
+        potential_independent_cell,
+        na.rm = TRUE
       ),
 
     .groups = "drop"
   ) %>%
   arrange(
     desc(
-      sara_unique_valid_coastal_cells
+      n_unique_Sara_valid_cells
     )
   )
 
 reviewer_codes <- c(
   "GB", "FR", "IT",
   "ES", "PT",
-  "GR", "HR", "SI", "ME", "AL",
+  "SI", "HR", "BA", "ME", "AL", "GR",
   "TR", "BG", "RO",
   "CY", "MT"
 )
 
-reviewer_country_summary <-
-  country_summary %>%
+reviewer_points_summary <-
+  point_country_summary %>%
+  filter(
+    country_code %in%
+      reviewer_codes
+  )
+
+reviewer_cells_summary <-
+  cell_country_summary %>%
   filter(
     country_code %in%
       reviewer_codes
   )
 
 # ------------------------------------------------------------
-# 11. Candidate independent Sara/Ribotta information
+# 13. Critical reviewer-country points
 # ------------------------------------------------------------
 
-candidate_points <- point_audit %>%
+critical_points <- sara_df %>%
   filter(
-    within_valid_coastal_domain,
-    sara_adds_new_cell_vs_REV1
+    country_code %in%
+      reviewer_codes
   ) %>%
   arrange(
-    flagged_distance_m
+    country_code,
+    retained_by_REV1_spatial_rule,
+    snap_distance_m
   )
 
-candidate_independent_points <-
-  point_audit %>%
+independent_candidates <- sara_df %>%
   filter(
-    within_valid_coastal_domain,
-    sara_adds_new_cell_vs_REV1,
-    candidate_nonGBIF_point
+    potential_independent_field_record
   ) %>%
   arrange(
+    country_code,
     desc(
-      flagged_distance_m
+      nearest_flagged_distance_m
     )
   )
 
-candidate_cells <- cell_audit %>%
+independent_reviewer_candidates <-
+  independent_candidates %>%
   filter(
-    sara_only_cell
-  ) %>%
-  arrange(
-    desc(
-      candidate_independent_cell
-    ),
-    desc(
-      n_sara_points
-    )
+    country_code %in%
+      reviewer_codes
   )
 
 # ------------------------------------------------------------
-# 12. Global summary
+# 14. Global validation summary
 # ------------------------------------------------------------
 
 summary_tbl <- tibble(
   metric = c(
-    "Sara source point geometries",
-
-    "Sara points within 1.5 km of raster-valid coastal domain",
-
-    "Sara unique raster-valid coastal cells",
-
-    "Sara coastal cells represented in final REV1 invaded dataset",
-
-    "Sara coastal cells absent from final REV1 invaded dataset",
-
-    "Sara-only cells with a GBIF flagged record within 1 km",
-
-    "Sara-only cells without a GBIF flagged record within 1 km",
-
-    "Sara points with GBIF flagged record within 100 m",
-
-    "Sara points with GBIF flagged record within 500 m",
-
-    "Sara points with GBIF flagged record within 1 km",
-
-    "Sara points with GBIF flagged record within 5 km",
-
-    "Final REV1 invaded cells reconstructed",
-
-    "Final REV1 invaded occurrence records"
+    "Official reconstructed European valid coastal cells",
+    "Expected REV1 European valid coastal cells",
+    "Domain cell count matches REV1",
+    "Sara/Ribotta point geometries",
+    "Sara points directly in valid coastal cell",
+    "Sara points snapped to nearest valid cell <=1500 m",
+    "Sara points retained by REV1 spatial rule",
+    "Sara points farther than 1500 m from valid coastal mask",
+    "Sara unique valid coastal cells",
+    "Sara valid cells represented in final REV1",
+    "Sara valid cells absent from final REV1",
+    "Sara valid cells potentially independent from GBIF",
+    "Sara points with GBIF within 100 m",
+    "Sara points with GBIF within 1 km",
+    "Sara points with GBIF within 5 km"
   ),
 
   value = c(
-    nrow(point_audit),
-
-    sum(
-      point_audit$within_valid_coastal_domain,
-      na.rm = TRUE
+    as.character(n_valid_cells),
+    as.character(expected_domain_cells),
+    as.character(domain_count_matches_REV1),
+    as.character(nrow(sara_df)),
+    as.character(
+      sum(
+        sara_df$exact_valid,
+        na.rm = TRUE
+      )
     ),
-
-    n_distinct(
-      sara_valid$domain_cell_id
+    as.character(
+      sum(
+        sara_df$snap_type ==
+          "nearest_valid_cell",
+        na.rm = TRUE
+      )
     ),
-
-    sum(
-      cell_audit$represented_in_final_REV1,
-      na.rm = TRUE
+    as.character(
+      sum(
+        sara_df$retained_by_REV1_spatial_rule,
+        na.rm = TRUE
+      )
     ),
-
-    sum(
-      cell_audit$sara_only_cell,
-      na.rm = TRUE
+    as.character(
+      sum(
+        !sara_df$retained_by_REV1_spatial_rule,
+        na.rm = TRUE
+      )
     ),
-
-    sum(
-      cell_audit$sara_only_cell &
-        cell_audit$any_gbif_within_1km,
-      na.rm = TRUE
+    as.character(
+      nrow(
+        cell_audit
+      )
     ),
-
-    sum(
-      cell_audit$candidate_independent_cell,
-      na.rm = TRUE
+    as.character(
+      sum(
+        cell_audit$cell_in_final_invaded,
+        na.rm = TRUE
+      )
     ),
-
-    sum(
-      point_audit$gbif_within_100m,
-      na.rm = TRUE
+    as.character(
+      sum(
+        cell_audit$sara_cell_absent_final,
+        na.rm = TRUE
+      )
     ),
-
-    sum(
-      point_audit$gbif_within_500m,
-      na.rm = TRUE
+    as.character(
+      sum(
+        cell_audit$potential_independent_cell,
+        na.rm = TRUE
+      )
     ),
-
-    sum(
-      point_audit$gbif_within_1km,
-      na.rm = TRUE
+    as.character(
+      sum(
+        sara_df$gbif_match_100m,
+        na.rm = TRUE
+      )
     ),
-
-    sum(
-      point_audit$gbif_within_5km,
-      na.rm = TRUE
+    as.character(
+      sum(
+        sara_df$gbif_match_1km,
+        na.rm = TRUE
+      )
     ),
-
-    length(
-      final_cells
-    ),
-
-    nrow(
-      occ
+    as.character(
+      sum(
+        sara_df$gbif_match_5km,
+        na.rm = TRUE
+      )
     )
   )
 )
 
 # ------------------------------------------------------------
-# 13. Save outputs
+# 15. Save corrected outputs
 # ------------------------------------------------------------
 
-readr::write_csv(
+write_csv(
   summary_tbl,
   file.path(
     audit_dir,
-    "03A_reconciliation_summary.csv"
+    "03COR_A_reconciliation_summary.csv"
   )
 )
 
-readr::write_csv(
-  point_audit,
+write_csv(
+  sara_df,
   file.path(
     audit_dir,
-    "03B_sara_point_reconciliation.csv"
+    "03COR_B_Sara_point_reconciliation.csv"
   )
 )
 
-readr::write_csv(
+write_csv(
   cell_audit,
   file.path(
     audit_dir,
-    "03C_sara_cell_reconciliation.csv"
+    "03COR_C_Sara_cell_reconciliation.csv"
   )
 )
 
-readr::write_csv(
-  country_summary,
+write_csv(
+  point_country_summary,
   file.path(
     audit_dir,
-    "03D_country_cell_summary.csv"
+    "03COR_D_point_summary_by_country.csv"
   )
 )
 
-readr::write_csv(
-  regional_summary,
+write_csv(
+  cell_country_summary,
   file.path(
     audit_dir,
-    "03E_regional_cell_summary.csv"
+    "03COR_E_cell_summary_by_country.csv"
   )
 )
 
-readr::write_csv(
-  reviewer_country_summary,
+write_csv(
+  reviewer_points_summary,
   file.path(
     audit_dir,
-    "03F_reviewer_country_summary.csv"
+    "03COR_F_reviewer_point_summary.csv"
   )
 )
 
-readr::write_csv(
-  candidate_points,
+write_csv(
+  reviewer_cells_summary,
   file.path(
     audit_dir,
-    "03G_sara_only_cell_points.csv"
+    "03COR_G_reviewer_cell_summary.csv"
   )
 )
 
-readr::write_csv(
-  candidate_independent_points,
+write_csv(
+  critical_points,
   file.path(
     audit_dir,
-    "03H_candidate_nonGBIF_sara_points.csv"
+    "03COR_H_all_reviewer_country_points.csv"
   )
 )
 
-readr::write_csv(
-  candidate_cells,
+write_csv(
+  independent_reviewer_candidates,
   file.path(
     audit_dir,
-    "03I_sara_only_cells.csv"
+    "03COR_I_candidate_independent_reviewer_points.csv"
   )
 )
 
 saveRDS(
   list(
     summary = summary_tbl,
-    point_audit = point_audit,
+    sara_points = sara_df,
     cell_audit = cell_audit,
-    country_summary = country_summary,
-    regional_summary = regional_summary,
-    final_cells = final_cells,
-    sara_shapefile = sara_file
+    point_country_summary = point_country_summary,
+    cell_country_summary = cell_country_summary,
+    reviewer_points_summary = reviewer_points_summary,
+    reviewer_cells_summary = reviewer_cells_summary,
+    independent_candidates = independent_candidates,
+    climate_file = climate_file,
+    domain_cells = n_valid_cells
   ),
   file.path(
     work_dir,
-    "03_Ribotta_REV1_reconciliation.rds"
+    "03COR_Ribotta_REV1_reconciliation.rds"
   )
 )
 
 # ------------------------------------------------------------
-# 14. Console report
+# 16. WRITE CANONICAL REV2 WORKFLOW MANIFEST
+# ------------------------------------------------------------
+
+canonical_workflow <- c(
+  "ROSA RUGOSA REV2 - CANONICAL WORKFLOW",
+  "",
+  "VALID SCRIPTS",
+  "00_setup_REV2.R",
+  "01_occurrence_audit_REV2.R",
+  "02_model_input_audit_REV2.R",
+  "03_reconcile_Ribotta_with_REV1.R",
+  "",
+  "SUPERSEDED / INVALIDATED",
+  "03_reconcile_Ribotta_with_REV1_CORRECTED.R",
+  "04_trace_missing_Ribotta_cells.R",
+  "05_audit_Ribotta_geography_by_country.R",
+  "",
+  "IMPORTANT",
+  "Previous 03/04/05 audit outputs based on eu_df as a geographic grid were deleted.",
+  "The canonical step 03 uses the official REV1 raster-valid coastal mask reconstructed from current_europe_coast1km_selectedvars.tif.",
+  "Only outputs prefixed 03COR_ and the RDS 03COR_Ribotta_REV1_reconciliation.rds are valid for the Ribotta reconciliation stage."
+)
+
+writeLines(
+  canonical_workflow,
+  file.path(
+    audit_dir,
+    "REV2_CANONICAL_WORKFLOW.txt"
+  )
+)
+
+# ------------------------------------------------------------
+# 17. Console report
 # ------------------------------------------------------------
 
 cat(
@@ -1057,7 +1516,7 @@ cat(
 )
 
 cat(
-  "REV2 - RIBOTTA / REV1 RECONCILIATION COMPLETE\n"
+  "REV2 - CORRECTED RIBOTTA / REV1 RECONCILIATION\n"
 )
 
 cat(
@@ -1065,81 +1524,65 @@ cat(
 )
 
 print(
-  summary_tbl,
-  n = nrow(summary_tbl)
+  as.data.frame(
+    summary_tbl
+  ),
+  row.names = FALSE
 )
 
 cat(
-  "\nReviewer-focused country summary:\n"
+  "\nReviewer-focused POINT summary:\n"
 )
 
 print(
-  reviewer_country_summary,
-  n = nrow(reviewer_country_summary)
+  as.data.frame(
+    reviewer_points_summary
+  ),
+  row.names = FALSE
 )
 
 cat(
-  "\nRegional summary:\n"
+  "\nReviewer-focused CELL summary:\n"
 )
 
 print(
-  regional_summary,
-  n = nrow(regional_summary)
-)
-
-cat(
-  "\nSara shapefile used:\n",
-  sara_file,
-  "\n",
-  sep = ""
-)
-
-cat(
-  "\nKey outputs:\n"
-)
-
-cat(
-  file.path(
-    audit_dir,
-    "03A_reconciliation_summary.csv"
+  as.data.frame(
+    reviewer_cells_summary
   ),
-  "\n"
+  row.names = FALSE
 )
 
 cat(
-  file.path(
-    audit_dir,
-    "03F_reviewer_country_summary.csv"
-  ),
-  "\n"
+  "\nPotentially independent reviewer-country points:\n"
+)
+
+if (
+  nrow(
+    independent_reviewer_candidates
+  ) == 0
+) {
+
+  cat(
+    "None.\n"
+  )
+
+} else {
+
+  print(
+    as.data.frame(
+      independent_reviewer_candidates
+    ),
+    row.names = FALSE
+  )
+}
+
+cat(
+  "\nIMPORTANT: outputs from previous REV2 scripts 03, 04 and 05 ",
+  "that treated eu_df as the geographic coastal grid must be ignored.\n"
 )
 
 cat(
-  file.path(
-    audit_dir,
-    "03H_candidate_nonGBIF_sara_points.csv"
-  ),
-  "\n"
-)
-
-cat(
-  file.path(
-    audit_dir,
-    "03I_sara_only_cells.csv"
-  ),
-  "\n"
-)
-
-cat(
-  "\nNo occurrence has been added to the model dataset.\n"
-)
-
-cat(
-  "No model has been refitted.\n"
-)
-
-cat(
-  "No REV1 file has been modified.\n"
+  "\nNo occurrence has been added. No model has been fitted.\n"
 )
 
 cat(
