@@ -102,6 +102,7 @@ obsolete_scripts <- file.path(
 
 obsolete_audit_patterns <- c(
   "^03[A-I]_",
+  "^03COR_",
   "^04[A-F]_",
   "^05[A-I]_",
   "^REV2_AUDIT_SUMMARY_STAGE1\\.csv$"
@@ -128,6 +129,7 @@ obsolete_work_files <- file.path(
   work_dir,
   c(
     "03_Ribotta_REV1_reconciliation.rds",
+    "03COR_Ribotta_REV1_reconciliation.rds",
     "04_missing_Ribotta_cells_trace.rds",
     "05_Ribotta_geography_audit.rds"
   )
@@ -172,48 +174,73 @@ if (!file.exists(rdata_revision)) {
 }
 
 # ------------------------------------------------------------
-# 2. Locate the OFFICIAL REV1 European current-climate raster
+# 2. Locate the OFFICIAL REV1 European coastal mask
+#
+# Priority:
+# 1) saved mask from the official REV1 pipeline:
+#    europe_valid_coastal_cells_1km.rds
+# 2) original current CHELSA raster:
+#    current_europe_coast1km_selectedvars.tif
+#
+# Search REV1 plus its parent project directories because large
+# raster assets may have been stored outside REVISIONE_1_ROSA.
 # ------------------------------------------------------------
 
-climate_candidates <- list.files(
-  rev1_dir,
-  pattern = "^current_europe_coast1km_selectedvars\\.tif$",
-  recursive = TRUE,
-  full.names = TRUE,
-  ignore.case = TRUE
-)
-
-if (length(climate_candidates) == 0) {
-  stop(
-    "Could not find current_europe_coast1km_selectedvars.tif ",
-    "inside the REV1 archive. This file is required because it ",
-    "is the source used to reconstruct the official REV1 valid ",
-    "European coastal mask."
+search_roots <- unique(
+  normalizePath(
+    c(
+      rev1_dir,
+      dirname(rev1_dir),
+      dirname(dirname(rev1_dir))
+    ),
+    winslash = "/",
+    mustWork = FALSE
   )
-}
-
-# Prefer the path matching the official pipeline layout.
-preferred <- grep(
-  "data_raw[/\\\\]climate_chelsa[/\\\\]current",
-  climate_candidates,
-  ignore.case = TRUE
 )
 
-if (length(preferred) >= 1) {
-  climate_file <- climate_candidates[preferred[1]]
-} else {
-  climate_file <- climate_candidates[1]
-}
+search_roots <- search_roots[
+  dir.exists(search_roots)
+]
 
+cat("\nSearching official REV1 spatial assets under:\n")
 cat(
-  "\nOfficial REV1 current European raster:\n",
-  climate_file,
-  "\n",
-  sep = ""
+  paste0(" - ", search_roots, collapse = "\n"),
+  "\n"
 )
 
-bio_eu <- terra::rast(
-  climate_file
+find_exact_file <- function(roots, filename) {
+
+  out <- unlist(
+    lapply(
+      roots,
+      function(root) {
+        list.files(
+          root,
+          pattern = paste0(
+            "^",
+            gsub("\\.", "\\\\.", filename),
+            "$"
+          ),
+          recursive = TRUE,
+          full.names = TRUE,
+          ignore.case = TRUE
+        )
+      }
+    ),
+    use.names = FALSE
+  )
+
+  unique(out[file.exists(out)])
+}
+
+mask_candidates <- find_exact_file(
+  search_roots,
+  "europe_valid_coastal_cells_1km.rds"
+)
+
+climate_candidates <- find_exact_file(
+  search_roots,
+  "current_europe_coast1km_selectedvars.tif"
 )
 
 candidate_vars <- c(
@@ -222,67 +249,160 @@ candidate_vars <- c(
   "fcf", "gsl", "gst"
 )
 
-available_vars <- intersect(
-  candidate_vars,
-  names(bio_eu)
-)
+mask_source_type <- NA_character_
+mask_source_file <- NA_character_
+climate_file <- NA_character_
 
-if (length(available_vars) == 0) {
-  stop(
-    "None of the expected current predictor layers were found. ",
-    "Raster layers are: ",
-    paste(names(bio_eu), collapse = ", ")
-  )
-}
+if (length(mask_candidates) > 0) {
 
-cat(
-  "\nCurrent predictor layers used for mask reconstruction:\n"
-)
-
-print(
-  available_vars
-)
-
-# ------------------------------------------------------------
-# 3. Rebuild the exact complete-data valid coastal mask
-# ------------------------------------------------------------
-
-build_complete_mask <- function(r, vars) {
-
-  vars <- intersect(
-    vars,
-    names(r)
+  # Prefer the canonical data_clean location when multiple copies exist.
+  preferred_mask <- grep(
+    "data_clean",
+    mask_candidates,
+    ignore.case = TRUE
   )
 
-  if (length(vars) == 0) {
-    stop("No candidate variables available for mask construction.")
+  if (length(preferred_mask) > 0) {
+    mask_source_file <- mask_candidates[preferred_mask[1]]
+  } else {
+    mask_source_file <- mask_candidates[1]
   }
 
-  mask <- !is.na(
-    r[[vars[1]]]
+  cat(
+    "\nUsing saved REV1 valid coastal mask:\n",
+    mask_source_file,
+    "\n",
+    sep = ""
   )
 
-  if (length(vars) > 1) {
+  valid_eu_mask <- readRDS(
+    mask_source_file
+  )
 
-    for (v in vars[-1]) {
-      mask <- mask &
-        !is.na(
-          r[[v]]
-        )
+  if (!inherits(valid_eu_mask, "SpatRaster")) {
+    stop(
+      "The saved object europe_valid_coastal_cells_1km.rds ",
+      "is not a terra SpatRaster."
+    )
+  }
+
+  if (terra::nlyr(valid_eu_mask) != 1) {
+    stop(
+      "The saved European valid coastal mask should contain one layer, ",
+      "but contains ",
+      terra::nlyr(valid_eu_mask),
+      "."
+    )
+  }
+
+  mask_source_type <- "saved_REV1_mask_RDS"
+
+} else if (length(climate_candidates) > 0) {
+
+  preferred_tif <- grep(
+    "data_raw[/\\\\]climate_chelsa[/\\\\]current",
+    climate_candidates,
+    ignore.case = TRUE
+  )
+
+  if (length(preferred_tif) > 0) {
+    climate_file <- climate_candidates[preferred_tif[1]]
+  } else {
+    climate_file <- climate_candidates[1]
+  }
+
+  cat(
+    "\nSaved mask not found. Rebuilding from official REV1 raster:\n",
+    climate_file,
+    "\n",
+    sep = ""
+  )
+
+  bio_eu <- terra::rast(
+    climate_file
+  )
+
+  available_vars <- intersect(
+    candidate_vars,
+    names(bio_eu)
+  )
+
+  if (length(available_vars) == 0) {
+    stop(
+      "None of the expected current predictor layers were found. ",
+      "Raster layers are: ",
+      paste(names(bio_eu), collapse = ", ")
+    )
+  }
+
+  build_complete_mask <- function(r, vars) {
+
+    vars <- intersect(
+      vars,
+      names(r)
+    )
+
+    mask <- !is.na(
+      r[[vars[1]]]
+    )
+
+    if (length(vars) > 1) {
+
+      for (v in vars[-1]) {
+        mask <- mask &
+          !is.na(
+            r[[v]]
+          )
+      }
     }
+
+    terra::ifel(
+      mask,
+      1,
+      NA
+    )
   }
 
-  terra::ifel(
-    mask,
-    1,
-    NA
+  valid_eu_mask <- build_complete_mask(
+    bio_eu,
+    candidate_vars
+  )
+
+  mask_source_type <- "rebuilt_from_REV1_current_TIF"
+  mask_source_file <- climate_file
+
+} else {
+
+  # Write a diagnostic before stopping, so the missing dependency is explicit.
+  asset_diag <- data.frame(
+    searched_root = search_roots,
+    stringsAsFactors = FALSE
+  )
+
+  readr::write_csv(
+    asset_diag,
+    file.path(
+      audit_dir,
+      "03_MISSING_SPATIAL_ASSET_search_roots.csv"
+    )
+  )
+
+  stop(
+    "Neither europe_valid_coastal_cells_1km.rds nor ",
+    "current_europe_coast1km_selectedvars.tif could be found in the ",
+    "REV1 directory or its parent project directories. ",
+    "The search roots have been written to ",
+    file.path(
+      audit_dir,
+      "03_MISSING_SPATIAL_ASSET_search_roots.csv"
+    ),
+    ". Do not reconstruct the domain from eu_df."
   )
 }
 
-valid_eu_mask <- build_complete_mask(
-  bio_eu,
-  candidate_vars
-)
+# ------------------------------------------------------------
+# 3. Validate the official mask
+# ------------------------------------------------------------
 
 n_valid_cells <- as.integer(
   terra::global(
@@ -292,20 +412,30 @@ n_valid_cells <- as.integer(
   )[1, 1]
 )
 
-cat(
-  "\nReconstructed raster-valid European coastal cells:",
-  n_valid_cells,
-  "\n"
-)
-
-# This should reproduce the REV1 final domain count.
 expected_domain_cells <- 79579L
 
 domain_count_matches_REV1 <-
-  identical(
-    n_valid_cells,
-    expected_domain_cells
+  isTRUE(
+    n_valid_cells == expected_domain_cells
   )
+
+cat(
+  "\nSpatial source type:",
+  mask_source_type,
+  "\n"
+)
+
+cat(
+  "Spatial source file:",
+  mask_source_file,
+  "\n"
+)
+
+cat(
+  "Reconstructed raster-valid European coastal cells:",
+  n_valid_cells,
+  "\n"
+)
 
 cat(
   "Matches REV1 expected 79,579 cells:",
@@ -315,11 +445,12 @@ cat(
 
 if (!domain_count_matches_REV1) {
 
-  warning(
-    "The reconstructed mask contains ",
+  stop(
+    "STOP: the recovered REV1 coastal mask contains ",
     n_valid_cells,
-    " cells rather than the expected 79,579. ",
-    "Results should not be interpreted until this discrepancy is resolved."
+    " valid cells instead of the expected 79,579. ",
+    "No reconciliation output will be written until the spatial ",
+    "domain is reproduced exactly."
   )
 }
 
@@ -1466,6 +1597,8 @@ saveRDS(
     reviewer_points_summary = reviewer_points_summary,
     reviewer_cells_summary = reviewer_cells_summary,
     independent_candidates = independent_candidates,
+    mask_source_type = mask_source_type,
+    mask_source_file = mask_source_file,
     climate_file = climate_file,
     domain_cells = n_valid_cells
   ),
