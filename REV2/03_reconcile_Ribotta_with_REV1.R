@@ -101,7 +101,7 @@ obsolete_scripts <- file.path(
 )
 
 obsolete_audit_patterns <- c(
-  "^03[A-I]_",
+  "^03[A-L]_",
   "^03COR_",
   "^03_MISSING_",
   "^04[A-F]_",
@@ -130,7 +130,7 @@ obsolete_work_files <- file.path(
   work_dir,
   c(
     "03_Ribotta_REV1_reconciliation.rds",
-    "03COR_Ribotta_REV1_reconciliation.rds",
+    "03_Ribotta_REV1_reconciliation_VALID.rds",
     "04_missing_Ribotta_cells_trace.rds",
     "05_Ribotta_geography_audit.rds"
   )
@@ -1412,6 +1412,9 @@ cell_audit$potential_independent_cell <-
 
 # ------------------------------------------------------------
 # 12. Country summaries
+#
+# IMPORTANT: summary field names are deliberately prefixed with n_
+# so they never overwrite source columns during dplyr::summarise().
 # ------------------------------------------------------------
 
 point_country_summary <- sara_df %>%
@@ -1439,71 +1442,88 @@ point_country_summary <- sara_df %>%
   summarise(
     n_sara_points = n(),
 
-    exact_valid_points =
+    n_exact_valid_points =
       sum(
         exact_valid,
         na.rm = TRUE
       ),
 
-    snapped_within_1500m =
+    n_snapped_within_1500m =
       sum(
-        snap_type ==
-          "nearest_valid_cell",
+        snap_type == "nearest_valid_cell",
         na.rm = TRUE
       ),
 
-    retained_by_REV1_spatial_rule =
+    n_retained_by_REV1_spatial_rule =
       sum(
         retained_by_REV1_spatial_rule,
         na.rm = TRUE
       ),
 
-    outside_1500m =
+    n_outside_1500m =
       sum(
         !retained_by_REV1_spatial_rule,
         na.rm = TRUE
       ),
 
-    GBIF_within_100m =
+    n_GBIF_within_100m =
       sum(
         gbif_match_100m,
         na.rm = TRUE
       ),
 
-    GBIF_within_1km =
+    n_GBIF_within_1km =
       sum(
         gbif_match_1km,
         na.rm = TRUE
       ),
 
-    country_assigned_by_polygon =
+    n_country_assigned_by_polygon =
       sum(
         country_assignment_method == "polygon_within",
         na.rm = TRUE
       ),
 
-    country_assigned_by_nearest_polygon =
+    n_country_assigned_by_nearest_polygon =
       sum(
         country_assignment_method == "nearest_polygon_le20km",
         na.rm = TRUE
       ),
 
-    polygon_GBIF_country_agreement =
+    n_polygon_GBIF_country_agreement =
       sum(
         country_polygon_vs_GBIF_agree %in% TRUE,
         na.rm = TRUE
       ),
 
-    polygon_GBIF_country_disagreement =
+    n_polygon_GBIF_country_disagreement =
       sum(
         country_polygon_vs_GBIF_agree %in% FALSE,
         na.rm = TRUE
       ),
 
-    final_REV1_cell =
+    n_points_in_final_REV1_cell =
       sum(
         retained_by_REV1_spatial_rule &
           cell_in_final_invaded,
+        na.rm = TRUE
+      ),
+
+    min_distance_to_valid_mask_m =
+      min(
+        snap_distance_m,
+        na.rm = TRUE
+      ),
+
+    median_distance_to_valid_mask_m =
+      median(
+        snap_distance_m,
+        na.rm = TRUE
+      ),
+
+    max_distance_to_valid_mask_m =
+      max(
+        snap_distance_m,
         na.rm = TRUE
       ),
 
@@ -1514,6 +1534,16 @@ point_country_summary <- sara_df %>%
       n_sara_points
     )
   )
+
+for (nm in c(
+  "min_distance_to_valid_mask_m",
+  "median_distance_to_valid_mask_m",
+  "max_distance_to_valid_mask_m"
+)) {
+  point_country_summary[[nm]][
+    !is.finite(point_country_summary[[nm]])
+  ] <- NA_real_
+}
 
 cell_country_summary <- cell_audit %>%
   mutate(
@@ -1589,6 +1619,101 @@ reviewer_cells_summary <-
       reviewer_codes
   )
 
+# Detailed reviewer-country distance diagnostic.
+reviewer_distance_diagnostic <- sara_df %>%
+  filter(
+    country_code %in%
+      reviewer_codes
+  ) %>%
+  group_by(
+    country_code,
+    country_name
+  ) %>%
+  summarise(
+    n_points = n(),
+
+    n_exact_valid =
+      sum(
+        exact_valid,
+        na.rm = TRUE
+      ),
+
+    n_snapped_le1500m =
+      sum(
+        snap_type == "nearest_valid_cell",
+        na.rm = TRUE
+      ),
+
+    n_outside_1500m =
+      sum(
+        snap_type == "outside_1500m",
+        na.rm = TRUE
+      ),
+
+    min_snap_distance_m =
+      min(
+        snap_distance_m,
+        na.rm = TRUE
+      ),
+
+    q25_snap_distance_m =
+      as.numeric(
+        quantile(
+          snap_distance_m,
+          probs = 0.25,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+
+    median_snap_distance_m =
+      median(
+        snap_distance_m,
+        na.rm = TRUE
+      ),
+
+    q75_snap_distance_m =
+      as.numeric(
+        quantile(
+          snap_distance_m,
+          probs = 0.75,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+
+    max_snap_distance_m =
+      max(
+        snap_distance_m,
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  )
+
+for (nm in c(
+  "min_snap_distance_m",
+  "q25_snap_distance_m",
+  "median_snap_distance_m",
+  "q75_snap_distance_m",
+  "max_snap_distance_m"
+)) {
+  reviewer_distance_diagnostic[[nm]][
+    !is.finite(reviewer_distance_diagnostic[[nm]])
+  ] <- NA_real_
+}
+
+# Keep all points from Italy, France and UK for direct inspection.
+critical_country_points <- sara_df %>%
+  filter(
+    country_code %in% c("IT", "FR", "GB")
+  ) %>%
+  arrange(
+    country_code,
+    snap_distance_m,
+    sara_id
+  )
+
 # ------------------------------------------------------------
 # 13. Critical reviewer-country points
 # ------------------------------------------------------------
@@ -1600,8 +1725,8 @@ critical_points <- sara_df %>%
   ) %>%
   arrange(
     country_code,
-    retained_by_REV1_spatial_rule,
-    snap_distance_m
+    snap_distance_m,
+    sara_id
   )
 
 independent_candidates <- sara_df %>%
@@ -1727,7 +1852,7 @@ write_csv(
   summary_tbl,
   file.path(
     audit_dir,
-    "03COR_A_reconciliation_summary.csv"
+    "03A_reconciliation_summary.csv"
   )
 )
 
@@ -1735,7 +1860,7 @@ write_csv(
   sara_df,
   file.path(
     audit_dir,
-    "03COR_B_Sara_point_reconciliation.csv"
+    "03B_Sara_point_reconciliation.csv"
   )
 )
 
@@ -1743,7 +1868,7 @@ write_csv(
   cell_audit,
   file.path(
     audit_dir,
-    "03COR_C_Sara_cell_reconciliation.csv"
+    "03C_Sara_cell_reconciliation.csv"
   )
 )
 
@@ -1751,7 +1876,7 @@ write_csv(
   point_country_summary,
   file.path(
     audit_dir,
-    "03COR_D_point_summary_by_country.csv"
+    "03D_point_summary_by_country.csv"
   )
 )
 
@@ -1759,7 +1884,7 @@ write_csv(
   cell_country_summary,
   file.path(
     audit_dir,
-    "03COR_E_cell_summary_by_country.csv"
+    "03E_cell_summary_by_country.csv"
   )
 )
 
@@ -1767,7 +1892,7 @@ write_csv(
   reviewer_points_summary,
   file.path(
     audit_dir,
-    "03COR_F_reviewer_point_summary.csv"
+    "03F_reviewer_point_summary.csv"
   )
 )
 
@@ -1790,7 +1915,24 @@ write_csv(
   country_assignment_diagnostic,
   file.path(
     audit_dir,
-    "03COR_F2_country_assignment_diagnostic.csv"
+    "03G_country_assignment_diagnostic.csv"
+  )
+)
+
+
+write_csv(
+  reviewer_distance_diagnostic,
+  file.path(
+    audit_dir,
+    "03K_reviewer_distance_to_mask_diagnostic.csv"
+  )
+)
+
+write_csv(
+  critical_country_points,
+  file.path(
+    audit_dir,
+    "03L_Italy_France_UK_point_detail.csv"
   )
 )
 
@@ -1798,7 +1940,7 @@ write_csv(
   reviewer_cells_summary,
   file.path(
     audit_dir,
-    "03COR_G_reviewer_cell_summary.csv"
+    "03H_reviewer_cell_summary.csv"
   )
 )
 
@@ -1806,7 +1948,7 @@ write_csv(
   critical_points,
   file.path(
     audit_dir,
-    "03COR_H_all_reviewer_country_points.csv"
+    "03I_all_reviewer_country_points.csv"
   )
 )
 
@@ -1814,7 +1956,7 @@ write_csv(
   independent_reviewer_candidates,
   file.path(
     audit_dir,
-    "03COR_I_candidate_independent_reviewer_points.csv"
+    "03J_candidate_independent_reviewer_points.csv"
   )
 )
 
@@ -1827,6 +1969,8 @@ saveRDS(
     cell_country_summary = cell_country_summary,
     reviewer_points_summary = reviewer_points_summary,
     reviewer_cells_summary = reviewer_cells_summary,
+    reviewer_distance_diagnostic = reviewer_distance_diagnostic,
+    critical_country_points = critical_country_points,
     independent_candidates = independent_candidates,
     mask_source_type = mask_source_type,
     mask_source_file = mask_source_file,
@@ -1835,7 +1979,7 @@ saveRDS(
   ),
   file.path(
     work_dir,
-    "03COR_Ribotta_REV1_reconciliation.rds"
+    "03_Ribotta_REV1_reconciliation_VALID.rds"
   )
 )
 
@@ -1861,7 +2005,7 @@ canonical_workflow <- c(
   "Previous 03/04/05 audit outputs based on eu_df as a geographic grid were deleted.",
   "The canonical step 03 uses the official REV1 raster-valid coastal mask recovered from the saved RDS when available, otherwise rebuilt from the current CHELSA TIFF.",
   "Country assignment uses Natural Earth country names with a <=20 km nearest-polygon fallback for coastal points and is cross-checked against the nearest GBIF record.",
-  "Only outputs prefixed 03COR_ and the RDS 03COR_Ribotta_REV1_reconciliation.rds are valid for the Ribotta reconciliation stage."
+  "Only outputs 03A_ through 03L_ and the RDS 03_Ribotta_REV1_reconciliation_VALID.rds are valid for the Ribotta reconciliation stage."
 )
 
 writeLines(
@@ -1913,6 +2057,18 @@ cat(
 print(
   as.data.frame(
     reviewer_cells_summary
+  ),
+  row.names = FALSE
+)
+
+
+cat(
+  "\nReviewer-country DISTANCE TO MASK diagnostic:\n"
+)
+
+print(
+  as.data.frame(
+    reviewer_distance_diagnostic
   ),
   row.names = FALSE
 )
