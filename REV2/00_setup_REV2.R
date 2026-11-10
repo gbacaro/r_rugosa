@@ -125,7 +125,49 @@ cfg <- c(
 writeLines(cfg, paths_file)
 
 # ------------------------------------------------------------
-# 6. Input and structure checks
+# 6. Download the current REV2 audit scripts into 02_scripts
+# ------------------------------------------------------------
+
+rev2_raw_base <- paste0(
+  "https://raw.githubusercontent.com/gbacaro/r_rugosa/",
+  "rev2-audit/REV2"
+)
+
+audit_scripts <- c(
+  "01_occurrence_audit_REV2.R",
+  "02_model_input_audit_REV2.R"
+)
+
+download_status <- lapply(audit_scripts, function(nm) {
+  dest <- file.path(scripts_dir, nm)
+  src <- paste0(rev2_raw_base, "/", nm)
+
+  ok <- tryCatch({
+    utils::download.file(src, destfile = dest, mode = "wb", quiet = TRUE)
+    file.exists(dest) && file.info(dest)$size > 0
+  }, error = function(e) {
+    warning("Could not download ", nm, ": ", conditionMessage(e))
+    FALSE
+  })
+
+  data.frame(
+    script = nm,
+    destination = dest,
+    downloaded = ok,
+    stringsAsFactors = FALSE
+  )
+})
+
+download_status <- do.call(rbind, download_status)
+
+write.csv(
+  download_status,
+  file.path(audit_dir, "00_REV2_script_download_status.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# 7. Input and structure checks
 # ------------------------------------------------------------
 
 shp_files <- list.files(
@@ -189,7 +231,7 @@ capture.output(
 )
 
 # ------------------------------------------------------------
-# 7. Report
+# 8. Report
 # ------------------------------------------------------------
 
 cat("\n============================================================\n")
@@ -202,5 +244,7 @@ print(input_check, row.names = FALSE)
 cat("\nFolders created:\n")
 print(structure[, c("folder", "exists")], row.names = FALSE)
 cat("\nCentral path file:\n", paths_file, "\n")
+cat("\nREV2 audit scripts:\n")
+print(download_status, row.names = FALSE)
 cat("\nNo REV1 file has been modified. No model has been fitted.\n")
 cat("============================================================\n")
