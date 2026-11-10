@@ -24,7 +24,7 @@ rm(list = ls())
 gc()
 
 required_pkgs <- c(
-  "dplyr", "readr", "tibble", "tidyr"
+  "terra", "dplyr", "readr", "tibble", "tidyr"
 )
 
 missing_pkgs <- required_pkgs[
@@ -43,6 +43,7 @@ if (length(missing_pkgs) > 0) {
   )
 }
 
+library(terra)
 library(dplyr)
 library(readr)
 library(tibble)
@@ -131,7 +132,8 @@ required_step05_objects <- c(
   "candidate_independent_cells",
   "sara_point_audit",
   "final7_vars",
-  "n_final7_cells"
+  "n_final7_cells",
+  "coast_file"
 )
 
 missing_objects <- required_step05_objects[
@@ -324,6 +326,32 @@ if (any(
   )
 }
 
+
+# Use raster-cell centres as assigned coordinates, matching the GBIF schema.
+if (!file.exists(step05$coast_file)) {
+  stop(
+    "Canonical coastal raster recorded in step 05 is missing: ",
+    step05$coast_file
+  )
+}
+
+coast_rast <- terra::rast(
+  step05$coast_file
+)
+
+brussa_cell_xy <- terra::xyFromCell(
+  coast_rast[[1]],
+  as.integer(
+    brussa_cells$assigned_cell_id
+  )
+)
+
+brussa_cells$assigned_cell_longitude <-
+  brussa_cell_xy[, 1]
+
+brussa_cells$assigned_cell_latitude <-
+  brussa_cell_xy[, 2]
+
 # Keep all seven independent Italian observations as provenance evidence.
 brussa_point_audit <- sara_points %>%
   filter(
@@ -471,12 +499,12 @@ brussa_frozen <- brussa_cells %>%
 
     assigned_longitude =
       as.numeric(
-        sara_lon
+        assigned_cell_longitude
       ),
 
     assigned_latitude =
       as.numeric(
-        sara_lat
+        assigned_cell_latitude
       ),
 
     cell_id =
