@@ -26,7 +26,7 @@ if (!file.exists(paths_file)) {
 }
 source(paths_file)
 
-required_pkgs <- c("sf", "dplyr", "readr", "tibble")
+required_pkgs <- c("sf", "dplyr", "readr", "tibble", "tidyr")
 missing_pkgs <- required_pkgs[
   !vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)
 ]
