@@ -307,7 +307,22 @@ if (length(missing_final7) > 0) {
   )
 }
 
-clim7 <- clim[final7_vars]
+clim7 <- terra::subset(
+  clim,
+  final7_vars
+)
+
+if (terra::nlyr(clim7) != length(final7_vars)) {
+  stop(
+    "FINAL7 layer selection returned ",
+    terra::nlyr(clim7),
+    " layers instead of ",
+    length(final7_vars),
+    "."
+  )
+}
+
+names(clim7) <- final7_vars
 
 # ------------------------------------------------------------
 # 4. Rebuild FINAL7 valid-cell mask
@@ -529,16 +544,28 @@ bg_xy <- as.matrix(
   ]
 )
 
-bg_pred <- terra::extract(
-  clim7,
-  bg_xy
+bg_pred <- as.data.frame(
+  terra::extract(
+    clim7,
+    bg_xy
+  )
 )
+
+if (ncol(bg_pred) != length(final7_vars)) {
+  stop(
+    "Background predictor extraction returned ",
+    ncol(bg_pred),
+    " columns instead of ",
+    length(final7_vars),
+    "."
+  )
+}
+
+names(bg_pred) <- final7_vars
 
 background <- bind_cols(
   background,
-  as.data.frame(
-    bg_pred
-  )
+  bg_pred
 )
 
 bg_dist <- terra::extract(
@@ -611,16 +638,28 @@ presence_xy <- as.matrix(
   ]
 )
 
-presence_pred <- terra::extract(
-  clim7,
-  presence_xy
+presence_pred <- as.data.frame(
+  terra::extract(
+    clim7,
+    presence_xy
+  )
 )
+
+if (ncol(presence_pred) != length(final7_vars)) {
+  stop(
+    "Presence predictor extraction returned ",
+    ncol(presence_pred),
+    " columns instead of ",
+    length(final7_vars),
+    "."
+  )
+}
+
+names(presence_pred) <- final7_vars
 
 presence_model <- bind_cols(
   occ,
-  as.data.frame(
-    presence_pred
-  )
+  presence_pred
 )
 
 presence_model$pa <- 1L
