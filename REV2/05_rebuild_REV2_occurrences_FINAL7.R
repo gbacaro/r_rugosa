@@ -4,26 +4,27 @@
 #
 # Purpose
 # -------
-# Rebuild the European invaded occurrence set using:
-#   - the occurrence-quality filters explicitly declared in REV1;
-#   - the geographic coastal raster;
+# Rebuild the European invaded occurrence set on a corrected
+# 1-km coastal domain using:
+#   - the occurrence-quality filters declared in REV1;
+#   - the unmasked European current-climate raster stack;
+#   - a 1,000-m terrestrial coastal belt built in EPSG:3035;
+#   - raster-cell centres as the coastal-domain inclusion rule;
 #   - ONLY the seven predictors retained in the final SDM;
-#   - the original <=1500 m snapping rule;
+#   - <=1,500 m occurrence-to-cell snapping in EPSG:3035;
 #   - one occurrence per raster cell.
 #
-# Sara/Ribotta data are NOT added to calibration here. They are
-# reconciled against the rebuilt GBIF set to identify genuinely
-# independent candidate field observations for later review.
-#
-# No model is fitted.
-# No REV1 file is modified.
+# The previous EPSG:3857 coastal mask is not used.
+# Sara/Ribotta data are audited but not added to calibration here.
+# No model is fitted and no REV1 file is modified.
 # ============================================================
 
 rm(list = ls())
 gc()
 
 required_pkgs <- c(
-  "terra", "sf", "dplyr", "readr", "tibble", "tidyr"
+  "terra", "sf", "dplyr", "readr", "tibble", "tidyr",
+  "rnaturalearth", "rnaturalearthdata"
 )
 
 missing_pkgs <- required_pkgs[
@@ -48,6 +49,8 @@ library(dplyr)
 library(readr)
 library(tibble)
 library(tidyr)
+library(rnaturalearth)
+library(rnaturalearthdata)
 
 sf::sf_use_s2(TRUE)
 
@@ -81,6 +84,16 @@ dir.create(
   showWarnings = FALSE
 )
 
+mask_file <- file.path(
+  work_dir,
+  "05_REV2_FINAL7_TRUE1KM_mask.tif"
+)
+
+belt_file <- file.path(
+  work_dir,
+  "05_REV2_europe_coastal_belt_1km_EPSG3035.rds"
+)
+
 old_05 <- c(
   list.files(
     audit_dir,
@@ -94,7 +107,9 @@ old_05 <- c(
   file.path(
     work_dir,
     "occurrences_REV2_FINAL7_GBIF.csv"
-  )
+  ),
+  mask_file,
+  belt_file
 )
 
 old_05 <- old_05[
@@ -137,7 +152,6 @@ if (!file.exists(step03_file)) {
   )
 }
 
-# Search the official current coastal stack.
 search_roots <- unique(
   normalizePath(
     c(
@@ -184,41 +198,41 @@ find_exact_file <- function(
   )
 
   unique(
-    out[file.exists(out)]
+    out[
+      file.exists(out)
+    ]
   )
 }
 
-coast_candidates <- find_exact_file(
+bbox_candidates <- find_exact_file(
   search_roots,
-  "current_europe_coast1km_selectedvars.tif"
+  "current_europe_bbox_selectedvars.tif"
 )
 
-if (length(coast_candidates) == 0) {
+if (length(bbox_candidates) == 0) {
   stop(
-    "Could not find current_europe_coast1km_selectedvars.tif."
+    "Could not find current_europe_bbox_selectedvars.tif. ",
+    "The corrected REV2 coastal domain must be rebuilt from the ",
+    "unmasked European raster."
   )
 }
 
 preferred <- grep(
   "data_raw[/\\\\]climate_chelsa[/\\\\]current",
-  coast_candidates,
+  bbox_candidates,
   ignore.case = TRUE
 )
 
 if (length(preferred) > 0) {
-  coast_file <- coast_candidates[
+  bbox_file <- bbox_candidates[
     preferred[1]
   ]
 } else {
-  coast_file <- coast_candidates[1]
+  bbox_file <- bbox_candidates[1]
 }
 
-# ------------------------------------------------------------
-# 3. Build canonical FINAL7 mask
-# ------------------------------------------------------------
-
-clim <- terra::rast(
-  coast_file
+clim_bbox <- terra::rast(
+  bbox_file
 )
 
 final7_vars <- c(
@@ -233,18 +247,131 @@ final7_vars <- c(
 
 missing_final7 <- setdiff(
   final7_vars,
-  names(clim)
+  names(clim_bbox)
 )
 
 if (length(missing_final7) > 0) {
   stop(
-    "Current coastal raster is missing FINAL7 predictors: ",
+    "European bbox raster is missing FINAL7 predictors: ",
     paste(
       missing_final7,
       collapse = ", "
     )
   )
 }
+
+# ------------------------------------------------------------
+# 3. Correct 1-km European coastal domain
+# ------------------------------------------------------------
+
+eu_ext_vec <- c(
+  -15,
+  45,
+  30,
+  72
+)
+
+distance_crs <- 3035
+coastal_buffer_m <- 1000
+
+bb <- sf::st_as_sfc(
+  sf::st_bbox(
+    c(
+      xmin = eu_ext_vec[1],
+      xmax = eu_ext_vec[2],
+      ymin = eu_ext_vec[3],
+      ymax = eu_ext_vec[4]
+    ),
+    crs = sf::st_crs(4326)
+  )
+)
+
+coast <- rnaturalearth::ne_coastline(
+  scale = "medium",
+  returnclass = "sf"
+)
+
+land <- rnaturalearth::ne_countries(
+  scale = "medium",
+  returnclass = "sf"
+)
+
+coast <- suppressWarnings(
+  sf::st_crop(
+    coast,
+    sf::st_bbox(bb)
+  )
+)
+
+land <- suppressWarnings(
+  sf::st_crop(
+    land,
+    sf::st_bbox(bb)
+  )
+)
+
+coast_m <- sf::st_transform(
+  coast,
+  distance_crs
+)
+
+land_m <- sf::st_transform(
+  sf::st_make_valid(
+    land
+  ),
+  distance_crs
+)
+
+coast_union_m <- sf::st_union(
+  coast_m
+)
+
+land_union_m <- sf::st_union(
+  land_m
+)
+
+coast_buffer_m <- sf::st_buffer(
+  coast_union_m,
+  dist = coastal_buffer_m
+)
+
+belt_geom_m <- suppressWarnings(
+  sf::st_intersection(
+    land_union_m,
+    coast_buffer_m
+  )
+)
+
+belt_geom_m <- sf::st_make_valid(
+  belt_geom_m
+)
+
+if (length(belt_geom_m) == 0) {
+  stop(
+    "Corrected 1-km coastal belt is empty."
+  )
+}
+
+belt_m <- sf::st_sf(
+  belt_id = seq_along(
+    belt_geom_m
+  ),
+  geometry = belt_geom_m
+)
+
+belt_ll <- sf::st_transform(
+  belt_m,
+  4326
+)
+
+saveRDS(
+  belt_ll,
+  belt_file
+)
+
+# ------------------------------------------------------------
+# 4. FINAL7 raster mask: cell centres inside corrected belt
+# ------------------------------------------------------------
 
 complete_mask <- function(
   r,
@@ -271,9 +398,48 @@ complete_mask <- function(
   )
 }
 
-final7_mask <- complete_mask(
-  clim,
+final7_complete_bbox <- complete_mask(
+  clim_bbox,
   final7_vars
+)
+
+belt_vect <- terra::vect(
+  belt_ll
+)
+
+final7_complete_crop <- terra::crop(
+  final7_complete_bbox,
+  belt_vect,
+  snap = "out"
+)
+
+belt_center_mask <- terra::rasterize(
+  belt_vect,
+  final7_complete_crop,
+  field = 1,
+  background = NA,
+  touches = FALSE
+)
+
+final7_mask <- terra::ifel(
+  final7_complete_crop == 1 &
+    !is.na(
+      belt_center_mask
+    ),
+  1,
+  NA
+)
+
+terra::writeRaster(
+  final7_mask,
+  mask_file,
+  overwrite = TRUE,
+  wopt = list(
+    gdal = c(
+      "COMPRESS=LZW",
+      "TILED=YES"
+    )
+  )
 )
 
 n_final7_cells <- as.integer(
@@ -284,19 +450,109 @@ n_final7_cells <- as.integer(
   )[1, 1]
 )
 
-expected_final7_cells <- 210748L
-
-if (n_final7_cells != expected_final7_cells) {
+if (!is.finite(n_final7_cells) ||
+    n_final7_cells < 1L) {
   stop(
-    "FINAL7 mask contains ",
-    n_final7_cells,
-    " cells instead of the audited 210,748. ",
-    "Do not continue."
+    "Corrected FINAL7 mask contains no valid cells."
   )
 }
 
+valid_df <- terra::as.data.frame(
+  final7_mask,
+  xy = TRUE,
+  cells = TRUE,
+  na.rm = TRUE
+)
+
+valid_df <- valid_df[
+  ,
+  c(
+    "cell",
+    "x",
+    "y"
+  )
+]
+
+names(valid_df) <- c(
+  "cell_id",
+  "decimal_longitude",
+  "decimal_latitude"
+)
+
+valid_df$cell_id <- as.integer(
+  valid_df$cell_id
+)
+
+valid_sf <- sf::st_as_sf(
+  valid_df,
+  coords = c(
+    "decimal_longitude",
+    "decimal_latitude"
+  ),
+  crs = 4326,
+  remove = FALSE
+)
+
+valid_m <- sf::st_transform(
+  valid_sf,
+  distance_crs
+)
+
+belt_area_km2 <- as.numeric(
+  sum(
+    sf::st_area(
+      belt_m
+    )
+  )
+) / 1e6
+
+raster_area_km2 <- as.numeric(
+  terra::global(
+    terra::cellSize(
+      final7_mask,
+      unit = "km",
+      mask = TRUE
+    ),
+    "sum",
+    na.rm = TRUE
+  )[1, 1]
+)
+
+domain_summary <- tibble(
+  metric = c(
+    "Coastal buffer distance m",
+    "Distance CRS EPSG",
+    "Raster inclusion rule",
+    "FINAL7 valid coastal cells",
+    "Vector coastal-belt area km2",
+    "FINAL7 raster-domain area km2"
+  ),
+  value = c(
+    as.character(
+      coastal_buffer_m
+    ),
+    as.character(
+      distance_crs
+    ),
+    "cell_center_inside_terrestrial_1km_belt",
+    as.character(
+      n_final7_cells
+    ),
+    format(
+      belt_area_km2,
+      digits = 12,
+      scientific = FALSE
+    ),
+    format(
+      raster_area_km2,
+      digits = 12,
+      scientific = FALSE
+    )
+  )
+)
+
 # ------------------------------------------------------------
-# 4. Read declared-filter GBIF occurrence archive
+# 5. Read declared-filter GBIF occurrence archive
 # ------------------------------------------------------------
 
 precoast <- readr::read_csv(
@@ -341,14 +597,6 @@ precoast$gbif_id <- as.character(
   precoast$gbif_id
 )
 
-# Same European extent used by the REV1 pipeline.
-eu_ext_vec <- c(
-  -15,
-  45,
-  30,
-  72
-)
-
 eu_precoast <- precoast %>%
   filter(
     is.finite(
@@ -364,12 +612,15 @@ eu_precoast <- precoast %>%
   )
 
 # ------------------------------------------------------------
-# 5. Canonical occurrence-to-mask assignment
+# 6. Occurrence-to-mask assignment in EPSG:3035
 # ------------------------------------------------------------
 
 assign_occurrences_to_mask <- function(
   df,
   mask_rast,
+  valid_df,
+  valid_m,
+  bbox_template,
   max_snap_m = 1500,
   deduplicate = TRUE
 ) {
@@ -409,7 +660,7 @@ assign_occurrences_to_mask <- function(
     xy
   )
 
-  vals <- terra::values(
+  mask_vals <- terra::values(
     mask_rast,
     mat = FALSE
   )
@@ -417,7 +668,9 @@ assign_occurrences_to_mask <- function(
   exact_ok <-
     !is.na(cell_guess) &
     !is.na(
-      vals[cell_guess]
+      mask_vals[
+        cell_guess
+      ]
     )
 
   out_list <- list()
@@ -431,9 +684,11 @@ assign_occurrences_to_mask <- function(
     ]
 
     exact$cell_id <-
-      cell_guess[
-        exact_ok
-      ]
+      as.integer(
+        cell_guess[
+          exact_ok
+        ]
+      )
 
     exact_xy <- terra::xyFromCell(
       mask_rast,
@@ -453,12 +708,9 @@ assign_occurrences_to_mask <- function(
       ]
 
     exact$snap_distance_m <- 0
+    exact$snap_type <- "exact_valid_cell"
 
-    exact$snap_type <-
-      "exact_valid_cell"
-
-    out_list[["exact"]] <-
-      exact
+    out_list[["exact"]] <- exact
   }
 
   remaining <- df[
@@ -468,29 +720,6 @@ assign_occurrences_to_mask <- function(
   ]
 
   if (nrow(remaining) > 0) {
-
-    valid_df <- terra::as.data.frame(
-      mask_rast,
-      xy = TRUE,
-      cells = TRUE,
-      na.rm = TRUE
-    )[
-      ,
-      c(
-        "cell",
-        "x",
-        "y"
-      )
-    ]
-
-    valid_sf <- sf::st_as_sf(
-      valid_df,
-      coords = c(
-        "x",
-        "y"
-      ),
-      crs = 4326
-    )
 
     rem_sf <- sf::st_as_sf(
       remaining,
@@ -502,14 +731,9 @@ assign_occurrences_to_mask <- function(
       remove = FALSE
     )
 
-    valid_m <- sf::st_transform(
-      valid_sf,
-      3857
-    )
-
     rem_m <- sf::st_transform(
       rem_sf,
-      3857
+      distance_crs
     )
 
     idx <- sf::st_nearest_feature(
@@ -543,17 +767,17 @@ assign_occurrences_to_mask <- function(
       ]
 
       snapped$cell_id <-
-        valid_df$cell[
+        valid_df$cell_id[
           nearest
         ]
 
       snapped$decimal_longitude <-
-        valid_df$x[
+        valid_df$decimal_longitude[
           nearest
         ]
 
       snapped$decimal_latitude <-
-        valid_df$y[
+        valid_df$decimal_latitude[
           nearest
         ]
 
@@ -565,8 +789,7 @@ assign_occurrences_to_mask <- function(
       snapped$snap_type <-
         "nearest_valid_cell"
 
-      out_list[["snapped"]] <-
-        snapped
+      out_list[["snapped"]] <- snapped
     }
   }
 
@@ -584,7 +807,21 @@ assign_occurrences_to_mask <- function(
     out_list
   )
 
-  # Deterministic one-record-per-cell aggregation when requested.
+  assigned$bbox_cell_id <- as.integer(
+    terra::cellFromXY(
+      bbox_template,
+      as.matrix(
+        assigned[
+          ,
+          c(
+            "decimal_longitude",
+            "decimal_latitude"
+          )
+        ]
+      )
+    )
+  )
+
   if (deduplicate) {
 
     assigned <- assigned %>%
@@ -605,10 +842,12 @@ assign_occurrences_to_mask <- function(
   assigned
 }
 
-# Keep both the full assignment and the one-record-per-cell calibration set.
 gbif_final7_all <- assign_occurrences_to_mask(
   eu_precoast,
   final7_mask,
+  valid_df,
+  valid_m,
+  clim_bbox[[1]],
   max_snap_m = 1500,
   deduplicate = FALSE
 )
@@ -628,7 +867,7 @@ gbif_final7 <- gbif_final7_all %>%
 gbif_final7$pa <- 1L
 
 # ------------------------------------------------------------
-# 6. Compare with REV1 final invaded occurrence set
+# 7. Compare with REV1 on the common CHELSA base grid
 # ------------------------------------------------------------
 
 if (!file.exists(rev1_rdata_general)) {
@@ -665,91 +904,130 @@ rev1_occ <- as.data.frame(
   )
 )
 
-if (!"cell_id" %in%
-    names(rev1_occ)) {
+required_rev1_cols <- c(
+  "gbif_id",
+  "decimal_longitude",
+  "decimal_latitude"
+)
+
+missing_rev1_cols <- setdiff(
+  required_rev1_cols,
+  names(rev1_occ)
+)
+
+if (length(missing_rev1_cols) > 0) {
   stop(
-    "REV1 final invaded object lacks cell_id."
+    "REV1 occurrence object lacks: ",
+    paste(
+      missing_rev1_cols,
+      collapse = ", "
+    )
   )
 }
 
-rev1_cells <- unique(
-  rev1_occ$cell_id
+rev1_occ$gbif_id <- as.character(
+  rev1_occ$gbif_id
 )
 
-rev2_cells <- unique(
-  gbif_final7$cell_id
+rev1_occ$bbox_cell_id <- as.integer(
+  terra::cellFromXY(
+    clim_bbox[[1]],
+    as.matrix(
+      rev1_occ[
+        ,
+        c(
+          "decimal_longitude",
+          "decimal_latitude"
+        )
+      ]
+    )
+  )
+)
+
+rev1_grid_cells <- unique(
+  rev1_occ$bbox_cell_id[
+    !is.na(
+      rev1_occ$bbox_cell_id
+    )
+  ]
+)
+
+rev2_grid_cells <- unique(
+  gbif_final7$bbox_cell_id[
+    !is.na(
+      gbif_final7$bbox_cell_id
+    )
+  ]
 )
 
 cell_compare_summary <- tibble(
   metric = c(
-    "REV1 final invaded cells",
-    "REV2 FINAL7 GBIF cells",
-    "Cells shared REV1 and REV2",
-    "New REV2 cells absent REV1",
-    "REV1 cells absent REV2"
+    "REV1 invaded cells on common CHELSA grid",
+    "REV2 corrected FINAL7 GBIF cells",
+    "Common CHELSA-grid cells shared",
+    "New REV2 CHELSA-grid cells absent REV1",
+    "REV1 CHELSA-grid cells absent REV2"
   ),
-
   value = c(
     length(
-      rev1_cells
+      rev1_grid_cells
     ),
     length(
-      rev2_cells
+      rev2_grid_cells
     ),
     length(
       intersect(
-        rev1_cells,
-        rev2_cells
+        rev1_grid_cells,
+        rev2_grid_cells
       )
     ),
     length(
       setdiff(
-        rev2_cells,
-        rev1_cells
+        rev2_grid_cells,
+        rev1_grid_cells
       )
     ),
     length(
       setdiff(
-        rev1_cells,
-        rev2_cells
+        rev1_grid_cells,
+        rev2_grid_cells
       )
     )
   )
 )
 
-
-# Trace the REV1 cells that disappear in the rebuilt REV2 set.
-rev1_occ$gbif_id <- as.character(
-  rev1_occ$gbif_id
-)
-
-absent_rev1_cells <- setdiff(
-  rev1_cells,
-  rev2_cells
+absent_rev1_grid_cells <- setdiff(
+  rev1_grid_cells,
+  rev2_grid_cells
 )
 
 rev1_absent_trace <- rev1_occ %>%
   filter(
-    cell_id %in%
-      absent_rev1_cells
+    bbox_cell_id %in%
+      absent_rev1_grid_cells
   ) %>%
   mutate(
     in_declared_precoast =
       gbif_id %in%
       precoast$gbif_id,
-
     in_europe_precoast =
       gbif_id %in%
       eu_precoast$gbif_id
   )
 
-# Directly trace the same GBIF record in the unthinned FINAL7 assignment.
 rev2_all_map <- gbif_final7_all %>%
   transmute(
-    gbif_id = as.character(gbif_id),
-    rev2_cell_id_same_record = cell_id,
-    rev2_snap_distance_m_same_record = snap_distance_m,
-    rev2_snap_type_same_record = snap_type
+    gbif_id = as.character(
+      gbif_id
+    ),
+    rev2_bbox_cell_id_same_record =
+      bbox_cell_id,
+    rev2_mask_cell_id_same_record =
+      cell_id,
+    rev2_snap_distance_m_same_record =
+      snap_distance_m,
+    rev2_snap_type_same_record =
+      snap_type
   )
 
 rev1_absent_trace <- rev1_absent_trace %>%
@@ -759,18 +1037,24 @@ rev1_absent_trace <- rev1_absent_trace %>%
   ) %>%
   mutate(
     same_record_reassigned =
-      !is.na(rev2_cell_id_same_record) &
-      rev2_cell_id_same_record != cell_id,
-
-    same_record_same_cell =
-      !is.na(rev2_cell_id_same_record) &
-      rev2_cell_id_same_record == cell_id
+      !is.na(
+        rev2_bbox_cell_id_same_record
+      ) &
+      rev2_bbox_cell_id_same_record !=
+        bbox_cell_id,
+    same_record_same_grid_cell =
+      !is.na(
+        rev2_bbox_cell_id_same_record
+      ) &
+      rev2_bbox_cell_id_same_record ==
+        bbox_cell_id
   )
 
-# For records removed by the pre-coastal coordinate deduplication,
-# identify a surviving record with the same coordinate key when available.
-rev1_absent_trace$replacement_gbif_id_same_coord <- NA_character_
-rev1_absent_trace$replacement_rev2_cell_id_same_coord <- NA_integer_
+rev1_absent_trace$replacement_gbif_id_same_coord <-
+  NA_character_
+
+rev1_absent_trace$replacement_rev2_bbox_cell_id_same_coord <-
+  NA_integer_
 
 if (
   "coord_key" %in% names(rev1_absent_trace) &&
@@ -779,13 +1063,17 @@ if (
 
   precoast_coord_map <- precoast %>%
     filter(
-      !is.na(coord_key),
+      !is.na(
+        coord_key
+      ),
       coord_key != ""
     ) %>%
     transmute(
       coord_key,
       replacement_gbif_id_same_coord =
-        as.character(gbif_id)
+        as.character(
+          gbif_id
+        )
     ) %>%
     distinct(
       coord_key,
@@ -804,13 +1092,14 @@ if (
     left_join(
       rev2_all_map %>%
         rename(
-          replacement_gbif_id_same_coord = gbif_id,
-          replacement_rev2_cell_id_same_coord =
-            rev2_cell_id_same_record
+          replacement_gbif_id_same_coord =
+            gbif_id,
+          replacement_rev2_bbox_cell_id_same_coord =
+            rev2_bbox_cell_id_same_record
         ) %>%
         select(
           replacement_gbif_id_same_coord,
-          replacement_rev2_cell_id_same_coord
+          replacement_rev2_bbox_cell_id_same_coord
         ),
       by = "replacement_gbif_id_same_coord"
     )
@@ -819,7 +1108,7 @@ if (
     rev1_absent_trace %>%
     select(
       -replacement_gbif_id_same_coord,
-      -replacement_rev2_cell_id_same_coord
+      -replacement_rev2_bbox_cell_id_same_coord
     ) %>%
     left_join(
       replacement_map,
@@ -830,7 +1119,6 @@ if (
     )
 }
 
-# Reconstruct declared filter status for the missing REV1 records.
 if (exists(
   "flagged",
   envir = rev1,
@@ -845,7 +1133,8 @@ if (exists(
     )
   )
 
-  if ("gbif_id" %in% names(flagged_rev1)) {
+  if ("gbif_id" %in%
+      names(flagged_rev1)) {
 
     flagged_rev1$gbif_id <- as.character(
       flagged_rev1$gbif_id
@@ -885,24 +1174,26 @@ if (exists(
               )
             )
           ),
-
         uncertainty_num =
           suppressWarnings(
             as.numeric(
               coordinate_uncertainty_in_meters
             )
           ),
-
         pass_basis =
           basis_norm %in%
           allowed_basis,
-
         pass_cc =
-          !is.na(cc_pass) &
-          as.logical(cc_pass),
-
+          !is.na(
+            cc_pass
+          ) &
+          as.logical(
+            cc_pass
+          ),
         pass_uncertainty_5km =
-          is.na(uncertainty_num) |
+          is.na(
+            uncertainty_num
+          ) |
           uncertainty_num <= 5000
       ) %>%
       select(
@@ -922,39 +1213,40 @@ if (exists(
       mutate(
         likely_reason =
           case_when(
-            is.na(pass_basis) ~
+            is.na(
+              pass_basis
+            ) ~
               "record_not_found_in_flagged_archive",
-
             !pass_basis ~
               "fails_declared_basisOfRecord_filter",
-
             !pass_cc ~
               "fails_declared_CoordinateCleaner_filter",
-
             !pass_uncertainty_5km ~
               "fails_declared_uncertainty_5km_filter",
-
             !in_declared_precoast &
-              !is.na(replacement_gbif_id_same_coord) ~
+              !is.na(
+                replacement_gbif_id_same_coord
+              ) ~
               "old_REV1_record_removed_by_coordinate_dedup_but_same_coordinate_retained",
-
             !in_declared_precoast ~
               "passes_declared_filters_but_removed_by_other_precoast_step",
-
             !in_europe_precoast ~
               "outside_Europe_bbox",
-
             same_record_reassigned ~
-              "same_GBIF_record_reassigned_to_different_FINAL7_cell",
-
-            same_record_same_cell ~
-              "same_GBIF_record_kept_in_same_cell_but_not_selected_as_representative",
-
+              "same_GBIF_record_reassigned_under_corrected_true1km_domain",
+            same_record_same_grid_cell ~
+              "same_GBIF_record_same_grid_cell_but_not_selected_as_representative",
             TRUE ~
-              "unresolved_after_direct_REV2_record_trace"
+              "unresolved_after_corrected_domain_trace"
           )
       )
   }
+}
+
+if (!"likely_reason" %in%
+    names(rev1_absent_trace)) {
+  rev1_absent_trace$likely_reason <-
+    "unresolved_no_flagged_status"
 }
 
 rev1_absent_reason_summary <- rev1_absent_trace %>%
@@ -965,7 +1257,7 @@ rev1_absent_reason_summary <- rev1_absent_trace %>%
   )
 
 # ------------------------------------------------------------
-# 7. GBIF country summaries
+# 8. GBIF country summaries
 # ------------------------------------------------------------
 
 if (!"country_code" %in%
@@ -1023,7 +1315,7 @@ target_country_summary <- tidyr::complete(
   )
 
 # ------------------------------------------------------------
-# 8. Reconcile Sara/Ribotta against corrected FINAL7 GBIF set
+# 9. Reconcile Sara/Ribotta against corrected GBIF set
 # ------------------------------------------------------------
 
 step03 <- readRDS(
@@ -1072,21 +1364,16 @@ sara_input <- sara_points %>%
       paste0(
         "SARA_",
         sara_id
-      )
+      ),
+    .source_row =
+      row_number()
   )
-
-sara_assigned <- assign_occurrences_to_mask(
-  sara_input,
-  final7_mask,
-  max_snap_m = 1500
-)
-
-# assign_occurrences_to_mask aggregates one record per cell.
-# For a point-level audit, assign all Sara points without deduplication.
 
 assign_points_no_dedup <- function(
   df,
   mask_rast,
+  valid_df,
+  valid_m,
   max_snap_m = 1500
 ) {
 
@@ -1109,7 +1396,7 @@ assign_points_no_dedup <- function(
     xy
   )
 
-  vals <- terra::values(
+  mask_vals <- terra::values(
     mask_rast,
     mat = FALSE
   )
@@ -1119,11 +1406,19 @@ assign_points_no_dedup <- function(
       cell_guess
     ) &
     !is.na(
-      vals[cell_guess]
+      mask_vals[
+        cell_guess
+      ]
     )
 
   df$assigned_cell_id <-
     NA_integer_
+
+  df$assigned_longitude <-
+    NA_real_
+
+  df$assigned_latitude <-
+    NA_real_
 
   df$snap_distance_m <-
     NA_real_
@@ -1133,10 +1428,33 @@ assign_points_no_dedup <- function(
 
   if (any(exact_ok)) {
 
+    exact_cells <- as.integer(
+      cell_guess[
+        exact_ok
+      ]
+    )
+
+    exact_xy <- terra::xyFromCell(
+      mask_rast,
+      exact_cells
+    )
+
     df$assigned_cell_id[
       exact_ok
-    ] <- cell_guess[
+    ] <- exact_cells
+
+    df$assigned_longitude[
       exact_ok
+    ] <- exact_xy[
+      ,
+      1
+    ]
+
+    df$assigned_latitude[
+      exact_ok
+    ] <- exact_xy[
+      ,
+      2
     ]
 
     df$snap_distance_m[
@@ -1154,29 +1472,6 @@ assign_points_no_dedup <- function(
 
   if (length(rem) > 0) {
 
-    valid_df <- terra::as.data.frame(
-      mask_rast,
-      xy = TRUE,
-      cells = TRUE,
-      na.rm = TRUE
-    )[
-      ,
-      c(
-        "cell",
-        "x",
-        "y"
-      )
-    ]
-
-    valid_sf <- sf::st_as_sf(
-      valid_df,
-      coords = c(
-        "x",
-        "y"
-      ),
-      crs = 4326
-    )
-
     rem_sf <- sf::st_as_sf(
       df[
         rem,
@@ -1191,14 +1486,9 @@ assign_points_no_dedup <- function(
       remove = FALSE
     )
 
-    valid_m <- sf::st_transform(
-      valid_sf,
-      3857
-    )
-
     rem_m <- sf::st_transform(
       rem_sf,
-      3857
+      distance_crs
     )
 
     idx <- sf::st_nearest_feature(
@@ -1225,10 +1515,26 @@ assign_points_no_dedup <- function(
         keep
       ]
 
+      nearest <- idx[
+        keep
+      ]
+
       df$assigned_cell_id[
         rows
-      ] <- valid_df$cell[
-        idx[keep]
+      ] <- valid_df$cell_id[
+        nearest
+      ]
+
+      df$assigned_longitude[
+        rows
+      ] <- valid_df$decimal_longitude[
+        nearest
+      ]
+
+      df$assigned_latitude[
+        rows
+      ] <- valid_df$decimal_latitude[
+        nearest
       ]
 
       df$snap_distance_m[
@@ -1267,18 +1573,16 @@ assign_points_no_dedup <- function(
 sara_point_audit <- assign_points_no_dedup(
   sara_input,
   final7_mask,
+  valid_df,
+  valid_m,
   max_snap_m = 1500
 )
 
 sara_point_audit$cell_already_in_GBIF_FINAL7 <-
   sara_point_audit$assigned_cell_id %in%
-  rev2_cells
+  gbif_final7$cell_id
 
-# Nearest retained FINAL7 GBIF occurrence using original coordinates.
-# This is useful for model-cell context but is NOT used by itself to
-# establish field-data independence.
-
-gbif_sf <- sf::st_as_sf(
+gbif_original_sf <- sf::st_as_sf(
   gbif_final7,
   coords = c(
     "orig_decimal_longitude",
@@ -1298,43 +1602,40 @@ sara_sf <- sf::st_as_sf(
   remove = FALSE
 )
 
-gbif_m <- sf::st_transform(
-  gbif_sf,
-  3035
+gbif_original_m <- sf::st_transform(
+  gbif_original_sf,
+  distance_crs
 )
 
 sara_m <- sf::st_transform(
   sara_sf,
-  3035
+  distance_crs
 )
 
-nearest_idx <- sf::st_nearest_feature(
+nearest_retained_idx <- sf::st_nearest_feature(
   sara_m,
-  gbif_m
+  gbif_original_m
 )
 
-nearest_dist <- as.numeric(
+nearest_retained_dist <- as.numeric(
   sf::st_distance(
     sara_m,
-    gbif_m[
-      nearest_idx,
+    gbif_original_m[
+      nearest_retained_idx,
     ],
     by_element = TRUE
   )
 )
 
 sara_point_audit$nearest_RETAINED_GBIF_distance_m <-
-  nearest_dist
+  nearest_retained_dist
 
 sara_point_audit$nearest_RETAINED_GBIF_id <-
   as.character(
     gbif_final7$gbif_id[
-      nearest_idx
+      nearest_retained_idx
     ]
   )
-
-# Independence must be assessed against ALL GBIF records that passed
-# the declared pre-coastal filters, before one-record-per-cell thinning.
 
 declared_gbif_sf <- sf::st_as_sf(
   eu_precoast,
@@ -1348,7 +1649,7 @@ declared_gbif_sf <- sf::st_as_sf(
 
 declared_gbif_m <- sf::st_transform(
   declared_gbif_sf,
-  3035
+  distance_crs
 )
 
 nearest_declared_idx <- sf::st_nearest_feature(
@@ -1383,9 +1684,8 @@ sara_point_audit$candidate_independent_field_point <-
     sara_point_audit$nearest_DECLARED_GBIF_distance_m
   ) &
   sara_point_audit$nearest_DECLARED_GBIF_distance_m >
-    1000
+  1000
 
-# Candidate independent cells: one representative Sara point per cell.
 candidate_independent_cells <- sara_point_audit %>%
   filter(
     candidate_independent_field_point
@@ -1406,15 +1706,12 @@ italy_detail <- sara_point_audit %>%
     country_code == "IT"
   ) %>%
   arrange(
-    candidate_independent_field_point %>%
-      desc(),
+    desc(
+      candidate_independent_field_point
+    ),
     nearest_DECLARED_GBIF_distance_m,
     sara_id
   )
-
-# ------------------------------------------------------------
-# 9. Sara summaries
-# ------------------------------------------------------------
 
 sara_country_summary <- sara_point_audit %>%
   mutate(
@@ -1433,26 +1730,22 @@ sara_country_summary <- sara_point_audit %>%
   ) %>%
   summarise(
     n_Sara_points = n(),
-
     n_retained_FINAL7 =
       sum(
         retained_FINAL7,
         na.rm = TRUE
       ),
-
     n_cells_already_GBIF =
       sum(
         retained_FINAL7 &
           cell_already_in_GBIF_FINAL7,
         na.rm = TRUE
       ),
-
     n_candidate_independent_points =
       sum(
         candidate_independent_field_point,
         na.rm = TRUE
       ),
-
     .groups = "drop"
   ) %>%
   arrange(
@@ -1529,40 +1822,22 @@ readr::write_csv(
   )
 )
 
-
-readr::write_csv(
-  rev1_absent_trace,
-  file.path(
-    audit_dir,
-    "05I_REV1_cells_absent_REV2_trace.csv"
-  )
-)
-
-readr::write_csv(
-  rev1_absent_reason_summary,
-  file.path(
-    audit_dir,
-    "05J_REV1_cells_absent_REV2_reason_summary.csv"
-  )
-)
-
 summary_tbl <- tibble(
   metric = c(
     "Declared-filter records before Europe restriction",
     "Declared-filter records inside Europe bbox",
-    "REV1 final invaded cells",
-    "REV2 FINAL7 GBIF cells",
-    "REV2 cells new vs REV1",
-    "REV1 cells absent REV2",
-    "Sara points retained under FINAL7",
-    "Sara points in a REV2 GBIF cell",
+    "REV1 invaded cells on common CHELSA grid",
+    "REV2 corrected FINAL7 GBIF cells",
+    "New REV2 CHELSA-grid cells vs REV1",
+    "REV1 CHELSA-grid cells absent REV2",
+    "Sara points retained under corrected FINAL7",
+    "Sara points in a corrected REV2 GBIF cell",
     "Sara candidate independent field points",
     "Sara candidate independent field cells",
     "Italian Sara points",
-    "Italian Sara points retained under FINAL7",
+    "Italian Sara points retained under corrected FINAL7",
     "Italian candidate independent field points"
   ),
-
   value = c(
     nrow(
       precoast
@@ -1571,21 +1846,21 @@ summary_tbl <- tibble(
       eu_precoast
     ),
     length(
-      rev1_cells
+      rev1_grid_cells
     ),
-    length(
-      rev2_cells
+    nrow(
+      gbif_final7
     ),
     length(
       setdiff(
-        rev2_cells,
-        rev1_cells
+        rev2_grid_cells,
+        rev1_grid_cells
       )
     ),
     length(
       setdiff(
-        rev1_cells,
-        rev2_cells
+        rev1_grid_cells,
+        rev2_grid_cells
       )
     ),
     sum(
@@ -1629,6 +1904,30 @@ readr::write_csv(
   )
 )
 
+readr::write_csv(
+  rev1_absent_trace,
+  file.path(
+    audit_dir,
+    "05I_REV1_cells_absent_REV2_trace.csv"
+  )
+)
+
+readr::write_csv(
+  rev1_absent_reason_summary,
+  file.path(
+    audit_dir,
+    "05J_REV1_cells_absent_REV2_reason_summary.csv"
+  )
+)
+
+readr::write_csv(
+  domain_summary,
+  file.path(
+    audit_dir,
+    "05K_corrected_coastal_domain_summary.csv"
+  )
+)
+
 saveRDS(
   list(
     final7_vars = final7_vars,
@@ -1645,7 +1944,15 @@ saveRDS(
     rev1_absent_trace = rev1_absent_trace,
     rev1_absent_reason_summary = rev1_absent_reason_summary,
     summary = summary_tbl,
-    coast_file = coast_file
+    domain_summary = domain_summary,
+    bbox_file = bbox_file,
+    grid_file = mask_file,
+    mask_file = mask_file,
+    coastal_belt_file = belt_file,
+    coastal_buffer_m = coastal_buffer_m,
+    distance_crs = distance_crs,
+    raster_inclusion_rule =
+      "cell_center_inside_terrestrial_1km_belt"
   ),
   file.path(
     work_dir,
@@ -1672,17 +1979,16 @@ canonical_workflow <- c(
   "03_reconcile_Ribotta_with_REV1.R",
   "04_audit_REV1_coastal_mask_support.R",
   "05_rebuild_REV2_occurrences_FINAL7.R",
-  "",
-  "SUPERSEDED / INVALIDATED",
-  "03_reconcile_Ribotta_with_REV1_CORRECTED.R",
-  "04_trace_missing_Ribotta_cells.R",
-  "05_audit_Ribotta_geography_by_country.R",
+  "06_freeze_REV2_occurrence_dataset.R",
+  "07_build_REV2_background_FINAL7.R",
   "",
   "IMPORTANT",
-  "REV2 occurrence reconstruction uses the quality filters declared in the manuscript and the seven-predictor current coastal mask.",
-  "Sara/Ribotta independence is assessed against all GBIF records passing the declared filters before spatial thinning; records are not yet added to model calibration.",
-  "REV1 cells absent from the FINAL7 cell set are traced to the same GBIF record under the expanded mask, including coordinate-deduplication replacements.",
-  "No model is refitted in steps 00-05."
+  "Steps 03-04 audit the REV1 workflow and diagnose the former ALL10/FCF coastal-mask problem.",
+  "Step 05 rebuilds the REV2 European domain from the unmasked current-climate raster using a 1,000-m terrestrial coastal belt in EPSG:3035.",
+  "Raster cells are included when their centres lie inside the corrected coastal belt; the former EPSG:3857 belt is not used.",
+  "Occurrence snapping up to 1,500 m is also evaluated in EPSG:3035.",
+  "Sara/Ribotta data are audited in step 05 but are not added to calibration there.",
+  "No model is fitted in steps 00-07."
 )
 
 writeLines(
@@ -1699,7 +2005,7 @@ cat(
 )
 
 cat(
-  "REV2 - FINAL7 OCCURRENCE REBUILD COMPLETE\n"
+  "REV2 - CORRECTED TRUE-1KM FINAL7 OCCURRENCE REBUILD\n"
 )
 
 cat(
@@ -1707,7 +2013,18 @@ cat(
 )
 
 cat(
-  "Core occurrence summary:\n"
+  "Corrected coastal-domain summary:\n"
+)
+
+print(
+  as.data.frame(
+    domain_summary
+  ),
+  row.names = FALSE
+)
+
+cat(
+  "\nCore occurrence summary:\n"
 )
 
 print(
@@ -1718,7 +2035,7 @@ print(
 )
 
 cat(
-  "\nREV1 vs REV2 cell comparison:\n"
+  "\nREV1 vs corrected REV2 common-grid comparison:\n"
 )
 
 print(
@@ -1729,7 +2046,7 @@ print(
 )
 
 cat(
-  "\nTarget-country REV2 FINAL7 counts:\n"
+  "\nTarget-country corrected REV2 counts:\n"
 )
 
 print(
@@ -1740,7 +2057,7 @@ print(
 )
 
 cat(
-  "\nREV1 cells absent from REV2 - reason summary:\n"
+  "\nREV1 cells absent from corrected REV2 - reason summary:\n"
 )
 
 print(
@@ -1775,7 +2092,7 @@ print(
 )
 
 cat(
-  "\nNo Sara/Ribotta record has been added to calibration.\n"
+  "\nNo Sara/Ribotta record has been added to calibration in step 05.\n"
 )
 
 cat(
