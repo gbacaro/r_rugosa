@@ -94,10 +94,10 @@ belt_file <- file.path(
   "05_REV2_europe_coastal_belt_1km_EPSG3035.rds"
 )
 
-old_05 <- c(
+invalidated_outputs <- c(
   list.files(
     audit_dir,
-    pattern = "^05[A-Z]_",
+    pattern = "^(05|06|07)[A-Z]_",
     full.names = TRUE
   ),
   file.path(
@@ -109,16 +109,40 @@ old_05 <- c(
     "occurrences_REV2_FINAL7_GBIF.csv"
   ),
   mask_file,
-  belt_file
+  belt_file,
+  file.path(
+    work_dir,
+    "06_REV2_occurrence_dataset_FROZEN.rds"
+  ),
+  file.path(
+    work_dir,
+    "occurrences_REV2_FROZEN.csv"
+  ),
+  file.path(
+    work_dir,
+    "background_REV2_FINAL7.csv"
+  ),
+  file.path(
+    work_dir,
+    "model_input_REV2_FINAL7.csv"
+  ),
+  file.path(
+    work_dir,
+    "07_REV2_background_FINAL7_FROZEN.rds"
+  )
 )
 
-old_05 <- old_05[
-  file.exists(old_05)
-]
+invalidated_outputs <- unique(
+  invalidated_outputs[
+    file.exists(
+      invalidated_outputs
+    )
+  ]
+)
 
-if (length(old_05) > 0) {
+if (length(invalidated_outputs) > 0) {
   unlink(
-    old_05,
+    invalidated_outputs,
     force = TRUE
   )
 }
