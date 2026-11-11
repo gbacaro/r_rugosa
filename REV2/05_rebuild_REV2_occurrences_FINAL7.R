@@ -1074,6 +1074,99 @@ rev1_absent_trace <- rev1_absent_trace %>%
         bbox_cell_id
   )
 
+# For REV1 records still absent from the corrected assignment, recover the
+# original declared-filter coordinates and measure the nearest corrected
+# FINAL7 cell directly in EPSG:3035.
+precoast_original_map <- eu_precoast %>%
+  transmute(
+    gbif_id = as.character(
+      gbif_id
+    ),
+    declared_original_longitude =
+      as.numeric(
+        decimal_longitude
+      ),
+    declared_original_latitude =
+      as.numeric(
+        decimal_latitude
+      )
+  ) %>%
+  distinct(
+    gbif_id,
+    .keep_all = TRUE
+  )
+
+rev1_absent_trace <- rev1_absent_trace %>%
+  left_join(
+    precoast_original_map,
+    by = "gbif_id"
+  )
+
+rev1_absent_trace$nearest_corrected_FINAL7_distance_m <-
+  NA_real_
+
+rev1_absent_trace$nearest_corrected_FINAL7_cell_id <-
+  NA_integer_
+
+trace_idx <- which(
+  is.na(
+    rev1_absent_trace$rev2_bbox_cell_id_same_record
+  ) &
+    is.finite(
+      rev1_absent_trace$declared_original_longitude
+    ) &
+    is.finite(
+      rev1_absent_trace$declared_original_latitude
+    )
+)
+
+if (length(trace_idx) > 0) {
+
+  trace_sf <- sf::st_as_sf(
+    rev1_absent_trace[
+      trace_idx,
+      ,
+      drop = FALSE
+    ],
+    coords = c(
+      "declared_original_longitude",
+      "declared_original_latitude"
+    ),
+    crs = 4326,
+    remove = FALSE
+  )
+
+  trace_m <- sf::st_transform(
+    trace_sf,
+    distance_crs
+  )
+
+  trace_nearest_idx <- sf::st_nearest_feature(
+    trace_m,
+    valid_m
+  )
+
+  trace_nearest_dist <- as.numeric(
+    sf::st_distance(
+      trace_m,
+      valid_m[
+        trace_nearest_idx,
+      ],
+      by_element = TRUE
+    )
+  )
+
+  rev1_absent_trace$nearest_corrected_FINAL7_distance_m[
+    trace_idx
+  ] <- trace_nearest_dist
+
+  rev1_absent_trace$nearest_corrected_FINAL7_cell_id[
+    trace_idx
+  ] <- valid_df$cell_id[
+    trace_nearest_idx
+  ]
+}
+
 rev1_absent_trace$replacement_gbif_id_same_coord <-
   NA_character_
 
@@ -1260,6 +1353,20 @@ if (exists(
               "same_GBIF_record_reassigned_under_corrected_true1km_domain",
             same_record_same_grid_cell ~
               "same_GBIF_record_same_grid_cell_but_not_selected_as_representative",
+            in_europe_precoast &
+              is.finite(
+                nearest_corrected_FINAL7_distance_m
+              ) &
+              nearest_corrected_FINAL7_distance_m >
+                1500 ~
+              "same_GBIF_record_more_than_1500m_from_corrected_FINAL7_domain",
+            in_europe_precoast &
+              is.finite(
+                nearest_corrected_FINAL7_distance_m
+              ) &
+              nearest_corrected_FINAL7_distance_m <=
+                1500 ~
+              "unexpected_assignment_failure_within_1500m",
             TRUE ~
               "unresolved_after_corrected_domain_trace"
           )
@@ -2090,6 +2197,36 @@ print(
   ),
   row.names = FALSE
 )
+
+remaining_unresolved <- rev1_absent_trace %>%
+  filter(
+    grepl(
+      "unresolved|unexpected_assignment_failure",
+      likely_reason
+    )
+  )
+
+if (nrow(remaining_unresolved) > 0) {
+  cat(
+    "\nRecords still requiring inspection after direct distance trace:\n"
+  )
+
+  print(
+    as.data.frame(
+      remaining_unresolved %>%
+        select(
+          gbif_id,
+          bbox_cell_id,
+          declared_original_longitude,
+          declared_original_latitude,
+          nearest_corrected_FINAL7_distance_m,
+          nearest_corrected_FINAL7_cell_id,
+          likely_reason
+        )
+    ),
+    row.names = FALSE
+  )
+}
 
 cat(
   "\nItalian Sara/Ribotta detail:\n"
