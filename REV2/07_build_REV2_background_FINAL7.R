@@ -4,18 +4,16 @@
 #
 # Purpose
 # -------
-# Build and freeze the European coastal background for REV2.
+# Build and freeze the European background from the corrected
+# true-1km FINAL7 domain produced by steps 05-06.
 #
-# The background follows the REV1 design:
-#   - FINAL7 raster-valid European coastal domain;
+# Background design:
+#   - corrected FINAL7 raster-valid coastal domain;
 #   - exclusion of cells within 1,000 m of any frozen presence;
-#   - 10,000 background cells sampled at random.
+#   - 10,000 unique background cells sampled without replacement;
+#   - explicit random seed for reproducibility.
 #
-# REV2 adds an explicit random seed and samples unique raster cells
-# without replacement for full reproducibility.
-#
-# No occurrence is modified.
-# No model is fitted.
+# No occurrence is modified and no model is fitted.
 # ============================================================
 
 rm(list = ls())
@@ -88,6 +86,10 @@ old_07 <- c(
   ),
   file.path(
     work_dir,
+    "model_input_REV2_FINAL7.csv"
+  ),
+  file.path(
+    work_dir,
     "07_REV2_background_FINAL7_FROZEN.rds"
   )
 )
@@ -104,7 +106,7 @@ if (length(old_07) > 0) {
 }
 
 # ------------------------------------------------------------
-# 2. Canonical inputs
+# 2. Canonical corrected inputs
 # ------------------------------------------------------------
 
 occ_file <- file.path(
@@ -121,7 +123,7 @@ if (!file.exists(occ_file)) {
   stop(
     "Missing frozen occurrence file: ",
     occ_file,
-    "\nRun 06_freeze_REV2_occurrence_dataset.R first."
+    "\nRun corrected 06_freeze_REV2_occurrence_dataset.R first."
   )
 }
 
@@ -140,6 +142,39 @@ occ <- readr::read_csv(
 step06 <- readRDS(
   step06_file
 )
+
+required_step06 <- c(
+  "final7_vars",
+  "n_final7_cells",
+  "frozen_n",
+  "bbox_file",
+  "mask_file",
+  "distance_crs",
+  "coastal_buffer_m",
+  "raster_inclusion_rule"
+)
+
+missing_step06 <- required_step06[
+  !vapply(
+    required_step06,
+    function(x) {
+      !is.null(
+        step06[[x]]
+      )
+    },
+    logical(1)
+  )
+]
+
+if (length(missing_step06) > 0) {
+  stop(
+    "Step-06 RDS lacks: ",
+    paste(
+      missing_step06,
+      collapse = ", "
+    )
+  )
+}
 
 required_occ_cols <- c(
   "occurrence_id",
@@ -164,17 +199,23 @@ if (length(missing_occ_cols) > 0) {
   )
 }
 
-if (nrow(occ) != 8709L) {
+frozen_n <- as.integer(
+  step06$frozen_n
+)
+
+if (nrow(occ) != frozen_n) {
   stop(
-    "Expected 8,709 frozen presences, found ",
+    "Frozen occurrence CSV contains ",
     nrow(occ),
+    " rows but step 06 records ",
+    frozen_n,
     "."
   )
 }
 
 if (dplyr::n_distinct(
   occ$cell_id
-) != 8709L) {
+) != frozen_n) {
   stop(
     "Frozen occurrence cells are not unique."
   )
@@ -190,116 +231,58 @@ if (!all(
 
 final7_vars <- step06$final7_vars
 
+expected_final7_vars <- c(
+  "bio3",
+  "bio8",
+  "bio9",
+  "bio15",
+  "bio18",
+  "gsl",
+  "gst"
+)
+
 if (!identical(
   final7_vars,
-  c(
-    "bio3",
-    "bio8",
-    "bio9",
-    "bio15",
-    "bio18",
-    "gsl",
-    "gst"
-  )
+  expected_final7_vars
 )) {
   stop(
     "Unexpected FINAL7 predictor definition in step 06."
   )
 }
 
-# ------------------------------------------------------------
-# 3. Locate official current coastal raster
-# ------------------------------------------------------------
+bbox_file <- step06$bbox_file
+mask_file <- step06$mask_file
 
-search_roots <- unique(
-  normalizePath(
-    c(
-      rev1_dir,
-      dirname(rev1_dir),
-      dirname(dirname(rev1_dir))
-    ),
-    winslash = "/",
-    mustWork = FALSE
-  )
-)
-
-search_roots <- search_roots[
-  dir.exists(search_roots)
-]
-
-find_exact_file <- function(
-  roots,
-  filename
-) {
-
-  out <- unlist(
-    lapply(
-      roots,
-      function(root) {
-        list.files(
-          root,
-          pattern = paste0(
-            "^",
-            gsub(
-              "\\.",
-              "\\\\.",
-              filename
-            ),
-            "$"
-          ),
-          recursive = TRUE,
-          full.names = TRUE,
-          ignore.case = TRUE
-        )
-      }
-    ),
-    use.names = FALSE
-  )
-
-  unique(
-    out[
-      file.exists(out)
-    ]
-  )
-}
-
-coast_candidates <- find_exact_file(
-  search_roots,
-  "current_europe_coast1km_selectedvars.tif"
-)
-
-if (length(coast_candidates) == 0) {
+if (!file.exists(bbox_file)) {
   stop(
-    "Could not find current_europe_coast1km_selectedvars.tif."
+    "Corrected European bbox raster is missing: ",
+    bbox_file
   )
 }
 
-preferred <- grep(
-  "data_raw[/\\\\]climate_chelsa[/\\\\]current",
-  coast_candidates,
-  ignore.case = TRUE
-)
-
-if (length(preferred) > 0) {
-  coast_file <- coast_candidates[
-    preferred[1]
-  ]
-} else {
-  coast_file <- coast_candidates[1]
+if (!file.exists(mask_file)) {
+  stop(
+    "Corrected FINAL7 mask is missing: ",
+    mask_file
+  )
 }
 
-clim <- terra::rast(
-  coast_file
+# ------------------------------------------------------------
+# 3. Climate stack and corrected FINAL7 mask
+# ------------------------------------------------------------
+
+clim_bbox <- terra::rast(
+  bbox_file
 )
 
 missing_final7 <- setdiff(
   final7_vars,
-  names(clim)
+  names(clim_bbox)
 )
 
 if (length(missing_final7) > 0) {
   stop(
-    "Current coastal raster lacks FINAL7 variables: ",
+    "European bbox raster lacks FINAL7 variables: ",
     paste(
       missing_final7,
       collapse = ", "
@@ -308,11 +291,12 @@ if (length(missing_final7) > 0) {
 }
 
 clim7 <- terra::subset(
-  clim,
+  clim_bbox,
   final7_vars
 )
 
-if (terra::nlyr(clim7) != length(final7_vars)) {
+if (terra::nlyr(clim7) !=
+    length(final7_vars)) {
   stop(
     "FINAL7 layer selection returned ",
     terra::nlyr(clim7),
@@ -324,38 +308,8 @@ if (terra::nlyr(clim7) != length(final7_vars)) {
 
 names(clim7) <- final7_vars
 
-# ------------------------------------------------------------
-# 4. Rebuild FINAL7 valid-cell mask
-# ------------------------------------------------------------
-
-complete_mask <- function(
-  r,
-  vars
-) {
-
-  x <- !is.na(
-    r[[vars[1]]]
-  )
-
-  if (length(vars) > 1) {
-    for (v in vars[-1]) {
-      x <- x &
-        !is.na(
-          r[[v]]
-        )
-    }
-  }
-
-  terra::ifel(
-    x,
-    1,
-    NA
-  )
-}
-
-final7_mask <- complete_mask(
-  clim,
-  final7_vars
+final7_mask <- terra::rast(
+  mask_file
 )
 
 n_final7_cells <- as.integer(
@@ -366,16 +320,17 @@ n_final7_cells <- as.integer(
   )[1, 1]
 )
 
-if (n_final7_cells != 210748L) {
+if (n_final7_cells !=
+    as.integer(
+      step06$n_final7_cells
+    )) {
   stop(
-    "FINAL7 mask should contain 210,748 cells, found ",
-    n_final7_cells,
-    "."
+    "Corrected FINAL7 mask size differs from step 06."
   )
 }
 
 # ------------------------------------------------------------
-# 5. Build 1-km presence-exclusion mask
+# 4. Validate presence cells on corrected mask
 # ------------------------------------------------------------
 
 presence_cells <- as.integer(
@@ -392,6 +347,18 @@ if (any(
   )
 }
 
+if (any(
+  presence_cells < 1L |
+    presence_cells >
+      terra::ncell(
+        final7_mask
+      )
+)) {
+  stop(
+    "Frozen occurrence set contains invalid corrected-mask cell IDs."
+  )
+}
+
 mask_vals <- terra::values(
   final7_mask,
   mat = FALSE
@@ -405,11 +372,16 @@ if (any(
   )
 )) {
   stop(
-    "At least one frozen occurrence cell is outside the FINAL7 mask."
+    "At least one frozen occurrence cell is outside the corrected FINAL7 mask."
   )
 }
 
+# ------------------------------------------------------------
+# 5. Exclude cells within 1 km of frozen presences
+# ------------------------------------------------------------
+
 presence_raster <- final7_mask
+
 terra::values(
   presence_raster
 ) <- NA_real_
@@ -507,7 +479,8 @@ background <- eligible_df[
     cell_id
   )
 
-if (nrow(background) != background_n) {
+if (nrow(background) !=
+    background_n) {
   stop(
     "Background sample does not contain exactly 10,000 rows."
   )
@@ -531,7 +504,7 @@ if (any(
 }
 
 # ------------------------------------------------------------
-# 7. Extract FINAL7 predictors and nearest-presence distance
+# 7. Extract FINAL7 predictors and distance diagnostics
 # ------------------------------------------------------------
 
 bg_xy <- as.matrix(
@@ -551,7 +524,8 @@ bg_pred <- as.data.frame(
   )
 )
 
-if (ncol(bg_pred) != length(final7_vars)) {
+if (ncol(bg_pred) !=
+    length(final7_vars)) {
   stop(
     "Background predictor extraction returned ",
     ncol(bg_pred),
@@ -589,7 +563,8 @@ background$distance_to_nearest_presence_m <-
 
 background$pa <- 0L
 background$source <- "background"
-background$background_seed <- background_seed
+background$background_seed <-
+  background_seed
 
 if (any(
   !is.finite(
@@ -645,7 +620,8 @@ presence_pred <- as.data.frame(
   )
 )
 
-if (ncol(presence_pred) != length(final7_vars)) {
+if (ncol(presence_pred) !=
+    length(final7_vars)) {
   stop(
     "Presence predictor extraction returned ",
     ncol(presence_pred),
@@ -736,9 +712,15 @@ model_input <- bind_rows(
   background_model_min
 )
 
-if (nrow(model_input) != 18709L) {
+expected_model_rows <- frozen_n +
+  background_n
+
+if (nrow(model_input) !=
+    expected_model_rows) {
   stop(
-    "Expected 18,709 rows in combined model input, found ",
+    "Expected ",
+    expected_model_rows,
+    " rows in combined model input, found ",
     nrow(model_input),
     "."
   )
@@ -746,15 +728,15 @@ if (nrow(model_input) != 18709L) {
 
 if (sum(
   model_input$pa == 1
-) != 8709L) {
+) != frozen_n) {
   stop(
-    "Combined model input does not contain 8,709 presences."
+    "Combined model input presence count is inconsistent with step 06."
   )
 }
 
 if (sum(
   model_input$pa == 0
-) != 10000L) {
+) != background_n) {
   stop(
     "Combined model input does not contain 10,000 background cells."
   )
@@ -766,7 +748,7 @@ if (sum(
 
 summary_tbl <- tibble(
   metric = c(
-    "FINAL7 valid coastal cells",
+    "Corrected FINAL7 valid coastal cells",
     "Frozen presence cells",
     "Background exclusion distance m",
     "Eligible background cells after exclusion",
@@ -780,12 +762,9 @@ summary_tbl <- tibble(
     "Combined presence rows",
     "Combined background rows"
   ),
-
   value = c(
     n_final7_cells,
-    nrow(
-      occ
-    ),
+    frozen_n,
     background_exclusion_m,
     n_eligible,
     background_seed,
@@ -816,39 +795,10 @@ summary_tbl <- tibble(
   )
 )
 
-# ------------------------------------------------------------
-# 11. Save canonical outputs
-# ------------------------------------------------------------
-
-readr::write_csv(
-  background,
-  file.path(
-    work_dir,
-    "background_REV2_FINAL7.csv"
-  )
-)
-
-readr::write_csv(
-  model_input,
-  file.path(
-    work_dir,
-    "model_input_REV2_FINAL7.csv"
-  )
-)
-
-readr::write_csv(
-  summary_tbl,
-  file.path(
-    audit_dir,
-    "07A_background_summary.csv"
-  )
-)
-
 predictor_summary <- bind_rows(
   lapply(
     final7_vars,
     function(v) {
-
       tibble(
         predictor = v,
         group = c(
@@ -918,6 +868,34 @@ predictor_summary <- bind_rows(
   )
 )
 
+# ------------------------------------------------------------
+# 11. Save canonical outputs
+# ------------------------------------------------------------
+
+readr::write_csv(
+  background,
+  file.path(
+    work_dir,
+    "background_REV2_FINAL7.csv"
+  )
+)
+
+readr::write_csv(
+  model_input,
+  file.path(
+    work_dir,
+    "model_input_REV2_FINAL7.csv"
+  )
+)
+
+readr::write_csv(
+  summary_tbl,
+  file.path(
+    audit_dir,
+    "07A_background_summary.csv"
+  )
+)
+
 readr::write_csv(
   predictor_summary,
   file.path(
@@ -938,7 +916,14 @@ saveRDS(
     background_seed = background_seed,
     background_exclusion_m = background_exclusion_m,
     n_eligible_background_cells = n_eligible,
-    coast_file = coast_file
+    n_final7_cells = n_final7_cells,
+    frozen_n = frozen_n,
+    bbox_file = bbox_file,
+    mask_file = mask_file,
+    distance_crs = step06$distance_crs,
+    coastal_buffer_m = step06$coastal_buffer_m,
+    raster_inclusion_rule =
+      step06$raster_inclusion_rule
   ),
   file.path(
     work_dir,
@@ -968,16 +953,12 @@ canonical_workflow <- c(
   "06_freeze_REV2_occurrence_dataset.R",
   "07_build_REV2_background_FINAL7.R",
   "",
-  "SUPERSEDED / INVALIDATED",
-  "03_reconcile_Ribotta_with_REV1_CORRECTED.R",
-  "04_trace_missing_Ribotta_cells.R",
-  "05_audit_Ribotta_geography_by_country.R",
-  "",
   "IMPORTANT",
-  "Step 06 freezes the invaded calibration set at 8,709 unique cells: 8,705 GBIF + 4 independent Brussa field cells.",
-  "Step 07 samples 10,000 unique FINAL7 background cells after excluding locations within 1,000 m of any frozen presence.",
+  "Step 05 rebuilds the corrected 1,000-m terrestrial European coastal domain from the unmasked current-climate raster in EPSG:3035.",
+  "Step 06 freezes all corrected GBIF cells plus four independently verified Brussa field cells.",
+  "Step 07 samples 10,000 unique corrected-domain background cells after a 1,000-m exclusion from frozen presences.",
   "Background sampling is reproducible with random seed 12345.",
-  "Background records are reference/background points; their role will be handled separately for presence-background and binary classification algorithms.",
+  "Background records are reference/background points; their algorithm-specific role is handled at model fitting.",
   "No model is fitted in steps 00-07."
 )
 
@@ -995,7 +976,7 @@ cat(
 )
 
 cat(
-  "REV2 - FINAL7 BACKGROUND FROZEN\n"
+  "REV2 - CORRECTED FINAL7 BACKGROUND FROZEN\n"
 )
 
 cat(
