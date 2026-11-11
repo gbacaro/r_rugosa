@@ -531,8 +531,7 @@ bg_xy <- as.matrix(
 
 bg_pred <- terra::extract(
   clim7,
-  bg_xy,
-  ID = FALSE
+  bg_xy
 )
 
 background <- bind_cols(
@@ -544,8 +543,7 @@ background <- bind_cols(
 
 bg_dist <- terra::extract(
   distance_to_presence,
-  bg_xy,
-  ID = FALSE
+  bg_xy
 )
 
 if (ncol(bg_dist) != 1) {
@@ -615,8 +613,7 @@ presence_xy <- as.matrix(
 
 presence_pred <- terra::extract(
   clim7,
-  presence_xy,
-  ID = FALSE
+  presence_xy
 )
 
 presence_model <- bind_cols(
