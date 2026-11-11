@@ -4,27 +4,22 @@
 #
 # Purpose
 # -------
-# Freeze the definitive invaded-range occurrence dataset for REV2.
+# Freeze the definitive invaded-range occurrence dataset after
+# the corrected true-1km FINAL7 rebuild in step 05.
 #
 # Calibration presences:
-#   1) 8,705 GBIF cells rebuilt under the FINAL7 coastal mask;
-#   2) 4 independent Brussa field cells from the Sara/Ribotta
-#      dataset, confirmed as >1 km from all GBIF records passing
-#      the declared filters and absent from the FINAL7 GBIF cells.
+#   1) all unique GBIF cells retained by corrected step 05;
+#   2) independent Brussa field cells confirmed by the audit.
 #
-# Other Sara/Ribotta candidate cells are retained only as audit
-# information and are NOT added to calibration.
-#
-# No background is sampled.
-# No model is fitted.
-# No REV1 file is modified.
+# Other Sara/Ribotta candidate cells remain audit-only.
+# No background is sampled and no model is fitted.
 # ============================================================
 
 rm(list = ls())
 gc()
 
 required_pkgs <- c(
-  "terra", "dplyr", "readr", "tibble", "tidyr"
+  "terra", "dplyr", "readr", "tibble"
 )
 
 missing_pkgs <- required_pkgs[
@@ -47,7 +42,6 @@ library(terra)
 library(dplyr)
 library(readr)
 library(tibble)
-library(tidyr)
 
 # ------------------------------------------------------------
 # 1. Paths and cleanup
@@ -107,7 +101,7 @@ if (length(old_06) > 0) {
 }
 
 # ------------------------------------------------------------
-# 2. Load canonical step-05 output
+# 2. Load corrected step-05 output
 # ------------------------------------------------------------
 
 step05_file <- file.path(
@@ -119,7 +113,7 @@ if (!file.exists(step05_file)) {
   stop(
     "Missing canonical step-05 RDS: ",
     step05_file,
-    "\nRun 05_rebuild_REV2_occurrences_FINAL7.R first."
+    "\nRun corrected 05_rebuild_REV2_occurrences_FINAL7.R first."
   )
 }
 
@@ -133,14 +127,20 @@ required_step05_objects <- c(
   "sara_point_audit",
   "final7_vars",
   "n_final7_cells",
-  "coast_file"
+  "bbox_file",
+  "grid_file",
+  "mask_file",
+  "coastal_belt_file",
+  "distance_crs"
 )
 
 missing_objects <- required_step05_objects[
   !vapply(
     required_step05_objects,
     function(x) {
-      !is.null(step05[[x]])
+      !is.null(
+        step05[[x]]
+      )
     },
     logical(1)
   )
@@ -169,10 +169,30 @@ sara_points <- as.data.frame(
 )
 
 final7_vars <- step05$final7_vars
-n_final7_cells <- step05$n_final7_cells
+n_final7_cells <- as.integer(
+  step05$n_final7_cells
+)
+
+bbox_file <- step05$bbox_file
+grid_file <- step05$grid_file
+mask_file <- step05$mask_file
+
+if (!file.exists(grid_file)) {
+  stop(
+    "Corrected FINAL7 grid/mask file is missing: ",
+    grid_file
+  )
+}
+
+if (!file.exists(bbox_file)) {
+  stop(
+    "European bbox climate raster is missing: ",
+    bbox_file
+  )
+}
 
 # ------------------------------------------------------------
-# 3. Validate canonical GBIF FINAL7 set
+# 3. Validate corrected GBIF set
 # ------------------------------------------------------------
 
 required_gbif_cols <- c(
@@ -194,7 +214,7 @@ missing_gbif_cols <- setdiff(
 
 if (length(missing_gbif_cols) > 0) {
   stop(
-    "Canonical GBIF FINAL7 set lacks: ",
+    "Corrected GBIF FINAL7 set lacks: ",
     paste(
       missing_gbif_cols,
       collapse = ", "
@@ -210,32 +230,35 @@ gbif_final7$cell_id <- as.integer(
   gbif_final7$cell_id
 )
 
-if (nrow(gbif_final7) != 8705L) {
+n_gbif <- nrow(
+  gbif_final7
+)
+
+if (n_gbif < 1L) {
   stop(
-    "Expected 8,705 GBIF FINAL7 cells, found ",
-    nrow(gbif_final7),
-    ". Do not freeze dataset."
+    "Corrected GBIF FINAL7 set is empty."
   )
 }
 
 if (dplyr::n_distinct(
   gbif_final7$cell_id
-) != 8705L) {
+) != n_gbif) {
   stop(
-    "GBIF FINAL7 cell_id values are not unique."
+    "Corrected GBIF FINAL7 cell_id values are not unique."
   )
 }
 
-if (n_final7_cells != 210748L) {
+if (!is.finite(
+  n_final7_cells
+) ||
+    n_final7_cells < n_gbif) {
   stop(
-    "Expected FINAL7 mask size 210,748 cells, found ",
-    n_final7_cells,
-    ". Do not freeze dataset."
+    "Invalid corrected FINAL7 domain size."
   )
 }
 
 # ------------------------------------------------------------
-# 4. Select only independent Brussa field cells
+# 4. Select independent Brussa field cells
 # ------------------------------------------------------------
 
 required_candidate_cols <- c(
@@ -291,68 +314,6 @@ brussa_cells <- candidate_cells %>%
   slice(1) %>%
   ungroup()
 
-expected_brussa_cells <- c(
-  22794523L,
-  22801719L,
-  22801720L,
-  22801723L
-)
-
-if (nrow(brussa_cells) != 4L) {
-  stop(
-    "Expected 4 independent Brussa cells, found ",
-    nrow(brussa_cells),
-    ". Do not freeze dataset."
-  )
-}
-
-if (!setequal(
-  as.integer(
-    brussa_cells$assigned_cell_id
-  ),
-  expected_brussa_cells
-)) {
-  stop(
-    "Independent Italian candidate cells do not match the audited Brussa cell IDs."
-  )
-}
-
-if (any(
-  brussa_cells$assigned_cell_id %in%
-    gbif_final7$cell_id
-)) {
-  stop(
-    "At least one Brussa field cell overlaps the canonical GBIF FINAL7 set."
-  )
-}
-
-
-# Use raster-cell centres as assigned coordinates, matching the GBIF schema.
-if (!file.exists(step05$coast_file)) {
-  stop(
-    "Canonical coastal raster recorded in step 05 is missing: ",
-    step05$coast_file
-  )
-}
-
-coast_rast <- terra::rast(
-  step05$coast_file
-)
-
-brussa_cell_xy <- terra::xyFromCell(
-  coast_rast[[1]],
-  as.integer(
-    brussa_cells$assigned_cell_id
-  )
-)
-
-brussa_cells$assigned_cell_longitude <-
-  brussa_cell_xy[, 1]
-
-brussa_cells$assigned_cell_latitude <-
-  brussa_cell_xy[, 2]
-
-# Keep all seven independent Italian observations as provenance evidence.
 brussa_point_audit <- sara_points %>%
   filter(
     country_code == "IT",
@@ -369,16 +330,59 @@ brussa_point_audit <- sara_points %>%
     sara_id
   )
 
+# These are provenance checks established during the Brussa audit.
 if (nrow(brussa_point_audit) != 7L) {
   stop(
-    "Expected 7 independent Italian field observations, found ",
+    "Expected 7 independent Brussa field observations after corrected ",
+    "geometry, found ",
     nrow(brussa_point_audit),
-    ". Do not freeze dataset."
+    ". Inspect step 05 before freezing."
   )
 }
 
+if (nrow(brussa_cells) != 4L) {
+  stop(
+    "Expected 4 independent Brussa raster cells after corrected ",
+    "geometry, found ",
+    nrow(brussa_cells),
+    ". Inspect step 05 before freezing."
+  )
+}
+
+if (any(
+  brussa_cells$assigned_cell_id %in%
+    gbif_final7$cell_id
+)) {
+  stop(
+    "At least one Brussa field cell overlaps the corrected GBIF FINAL7 set."
+  )
+}
+
+grid_rast <- terra::rast(
+  grid_file
+)
+
+brussa_cell_xy <- terra::xyFromCell(
+  grid_rast[[1]],
+  as.integer(
+    brussa_cells$assigned_cell_id
+  )
+)
+
+brussa_cells$assigned_cell_longitude <-
+  brussa_cell_xy[
+    ,
+    1
+  ]
+
+brussa_cells$assigned_cell_latitude <-
+  brussa_cell_xy[
+    ,
+    2
+  ]
+
 # ------------------------------------------------------------
-# 5. Standardise calibration occurrence schema
+# 5. Standardise frozen calibration schema
 # ------------------------------------------------------------
 
 gbif_frozen <- gbif_final7 %>%
@@ -388,77 +392,63 @@ gbif_frozen <- gbif_final7 %>%
         "GBIF_",
         gbif_id
       ),
-
     source =
       "GBIF",
-
     source_record_id =
       gbif_id,
-
     source_dataset =
       "GBIF download used in REV1/REV2 audit",
-
     country_code =
       as.character(
         country_code
       ),
-
     country_name =
-      if ("country" %in% names(gbif_final7)) {
-        as.character(country)
+      if ("country" %in%
+          names(gbif_final7)) {
+        as.character(
+          country
+        )
       } else {
         NA_character_
       },
-
     original_longitude =
       as.numeric(
         orig_decimal_longitude
       ),
-
     original_latitude =
       as.numeric(
         orig_decimal_latitude
       ),
-
     assigned_longitude =
       as.numeric(
         decimal_longitude
       ),
-
     assigned_latitude =
       as.numeric(
         decimal_latitude
       ),
-
     cell_id =
       as.integer(
         cell_id
       ),
-
     snap_distance_m =
       as.numeric(
         snap_distance_m
       ),
-
     snap_type =
       as.character(
         snap_type
       ),
-
     nearest_declared_GBIF_distance_m =
       0,
-
     nearest_declared_GBIF_id =
       gbif_id,
-
     field_observation =
       FALSE,
-
     calibration_presence =
       TRUE,
-
     provenance_note =
-      "GBIF occurrence passing declared REV2 filters; one representative per FINAL7 coastal raster cell"
+      "GBIF occurrence passing declared REV2 filters; one representative per corrected true-1km FINAL7 raster cell"
   )
 
 brussa_frozen <- brussa_cells %>%
@@ -468,78 +458,61 @@ brussa_frozen <- brussa_cells %>%
         "BRUSSA_CELL_",
         assigned_cell_id
       ),
-
     source =
       "Brussa_field",
-
     source_record_id =
       paste0(
         "SARA_",
         sara_id
       ),
-
     source_dataset =
       "Sara/Ribotta field dataset - Brussa",
-
     country_code =
       "IT",
-
     country_name =
       "Italy",
-
     original_longitude =
       as.numeric(
         sara_lon
       ),
-
     original_latitude =
       as.numeric(
         sara_lat
       ),
-
     assigned_longitude =
       as.numeric(
         assigned_cell_longitude
       ),
-
     assigned_latitude =
       as.numeric(
         assigned_cell_latitude
       ),
-
     cell_id =
       as.integer(
         assigned_cell_id
       ),
-
     snap_distance_m =
       as.numeric(
         snap_distance_m
       ),
-
     snap_type =
       as.character(
         snap_type
       ),
-
     nearest_declared_GBIF_distance_m =
       as.numeric(
         nearest_DECLARED_GBIF_distance_m
       ),
-
     nearest_declared_GBIF_id =
       as.character(
         nearest_DECLARED_GBIF_id
       ),
-
     field_observation =
       TRUE,
-
     calibration_presence =
       TRUE,
-
     provenance_note =
-      "Independent Brussa field observation; cell absent from FINAL7 GBIF set and >1 km from all GBIF records passing declared filters"
+      "Independent Brussa field observation; cell absent from corrected FINAL7 GBIF set and >1 km from all GBIF records passing declared filters"
   )
 
 occ_frozen <- bind_rows(
@@ -552,21 +525,26 @@ occ_frozen <- bind_rows(
     occurrence_id
   )
 
-# ------------------------------------------------------------
-# 6. Hard validation of frozen occurrence set
-# ------------------------------------------------------------
+n_brussa_cells <- nrow(
+  brussa_frozen
+)
 
-if (nrow(occ_frozen) != 8709L) {
+frozen_n <- nrow(
+  occ_frozen
+)
+
+expected_frozen_n <- n_gbif +
+  n_brussa_cells
+
+if (frozen_n != expected_frozen_n) {
   stop(
-    "Frozen occurrence set should contain 8,709 rows, found ",
-    nrow(occ_frozen),
-    "."
+    "Frozen occurrence count is internally inconsistent."
   )
 }
 
 if (dplyr::n_distinct(
   occ_frozen$cell_id
-) != 8709L) {
+) != frozen_n) {
   stop(
     "Frozen occurrence set does not contain exactly one presence per raster cell."
   )
@@ -580,22 +558,6 @@ if (anyDuplicated(
   )
 }
 
-if (sum(
-  occ_frozen$source == "GBIF"
-) != 8705L) {
-  stop(
-    "Frozen set does not contain exactly 8,705 GBIF presences."
-  )
-}
-
-if (sum(
-  occ_frozen$source == "Brussa_field"
-) != 4L) {
-  stop(
-    "Frozen set does not contain exactly 4 Brussa field cells."
-  )
-}
-
 if (!all(
   occ_frozen$calibration_presence
 )) {
@@ -605,7 +567,7 @@ if (!all(
 }
 
 # ------------------------------------------------------------
-# 7. Audit tables
+# 6. Audit tables
 # ------------------------------------------------------------
 
 source_summary <- occ_frozen %>%
@@ -621,7 +583,9 @@ country_summary <- occ_frozen %>%
   mutate(
     country_code =
       ifelse(
-        is.na(country_code) |
+        is.na(
+          country_code
+        ) |
           country_code == "",
         "UNRESOLVED",
         country_code
@@ -637,9 +601,21 @@ country_summary <- occ_frozen %>%
     source
   )
 
+other_sara_candidates <- candidate_cells %>%
+  filter(
+    !assigned_cell_id %in%
+      brussa_cells$assigned_cell_id
+  ) %>%
+  mutate(
+    included_in_calibration =
+      FALSE,
+    exclusion_from_calibration_reason =
+      "Independent provenance not confirmed as Brussa field survey; retained as audit only"
+  )
+
 freeze_summary <- tibble(
   metric = c(
-    "FINAL7 valid coastal cells",
+    "Corrected FINAL7 valid coastal cells",
     "Frozen GBIF calibration cells",
     "Independent Brussa field observations",
     "Independent Brussa field cells",
@@ -647,35 +623,25 @@ freeze_summary <- tibble(
     "Unique frozen raster cells",
     "Other Sara/Ribotta candidate cells excluded from calibration"
   ),
-
   value = c(
     n_final7_cells,
-    sum(
-      occ_frozen$source == "GBIF"
-    ),
+    n_gbif,
     nrow(
       brussa_point_audit
     ),
-    sum(
-      occ_frozen$source == "Brussa_field"
-    ),
-    nrow(
-      occ_frozen
-    ),
+    n_brussa_cells,
+    frozen_n,
     dplyr::n_distinct(
       occ_frozen$cell_id
     ),
     nrow(
-      candidate_cells
-    ) -
-      nrow(
-        brussa_cells
-      )
+      other_sara_candidates
+    )
   )
 )
 
 # ------------------------------------------------------------
-# 8. Save canonical frozen outputs
+# 7. Save canonical frozen outputs
 # ------------------------------------------------------------
 
 readr::write_csv(
@@ -726,22 +692,6 @@ readr::write_csv(
   )
 )
 
-other_sara_candidates <- candidate_cells %>%
-  filter(
-    !(
-      country_code == "IT" &
-        assigned_cell_id %in%
-          brussa_cells$assigned_cell_id
-    )
-  ) %>%
-  mutate(
-    included_in_calibration =
-      FALSE,
-
-    exclusion_from_calibration_reason =
-      "Independent provenance not confirmed as Brussa field survey; retained as audit only"
-  )
-
 readr::write_csv(
   other_sara_candidates,
   file.path(
@@ -762,7 +712,16 @@ saveRDS(
     freeze_summary = freeze_summary,
     final7_vars = final7_vars,
     n_final7_cells = n_final7_cells,
-    frozen_n = nrow(occ_frozen)
+    frozen_n = frozen_n,
+    n_gbif = n_gbif,
+    n_brussa_cells = n_brussa_cells,
+    bbox_file = bbox_file,
+    grid_file = grid_file,
+    mask_file = mask_file,
+    coastal_belt_file = step05$coastal_belt_file,
+    distance_crs = step05$distance_crs,
+    coastal_buffer_m = step05$coastal_buffer_m,
+    raster_inclusion_rule = step05$raster_inclusion_rule
   ),
   file.path(
     work_dir,
@@ -771,7 +730,7 @@ saveRDS(
 )
 
 # ------------------------------------------------------------
-# 9. Update canonical workflow manifest
+# 8. Update canonical workflow manifest
 # ------------------------------------------------------------
 
 manifest_file <- file.path(
@@ -790,18 +749,14 @@ canonical_workflow <- c(
   "04_audit_REV1_coastal_mask_support.R",
   "05_rebuild_REV2_occurrences_FINAL7.R",
   "06_freeze_REV2_occurrence_dataset.R",
-  "",
-  "SUPERSEDED / INVALIDATED",
-  "03_reconcile_Ribotta_with_REV1_CORRECTED.R",
-  "04_trace_missing_Ribotta_cells.R",
-  "05_audit_Ribotta_geography_by_country.R",
+  "07_build_REV2_background_FINAL7.R",
   "",
   "IMPORTANT",
-  "REV2 occurrence reconstruction uses the quality filters declared in the manuscript and the seven-predictor current coastal mask.",
-  "Step 05 established the canonical 8,705-cell GBIF FINAL7 set and audited Sara/Ribotta independence before spatial thinning.",
-  "Step 06 freezes the calibration occurrence set at 8,709 unique cells: 8,705 GBIF + 4 independent Brussa field cells.",
+  "Steps 03-04 audit the REV1 workflow and diagnose the former ALL10/FCF coastal-mask problem.",
+  "Step 05 rebuilds the European coastal domain from the unmasked climate raster using a 1,000-m terrestrial belt and occurrence distances in EPSG:3035.",
+  "Step 06 freezes the corrected calibration occurrence set: all corrected GBIF cells plus four independently verified Brussa field cells.",
   "Other Sara/Ribotta candidate cells remain audit-only and are not used for calibration.",
-  "No background is sampled and no model is fitted in steps 00-06."
+  "No background is sampled in step 06 and no model is fitted in steps 00-06."
 )
 
 writeLines(
@@ -810,7 +765,7 @@ writeLines(
 )
 
 # ------------------------------------------------------------
-# 10. Console report
+# 9. Console report
 # ------------------------------------------------------------
 
 cat(
@@ -818,7 +773,7 @@ cat(
 )
 
 cat(
-  "REV2 - OCCURRENCE DATASET FROZEN\n"
+  "REV2 - CORRECTED OCCURRENCE DATASET FROZEN\n"
 )
 
 cat(
